@@ -581,7 +581,8 @@ i18n
   .use(initReactI18next)
   .init({
     resources,
-    fallbackLng: 'en-US',
+    lng: localStorage.getItem('language') || 'si-LK',  // Sinhala as default
+    fallbackLng: 'si-LK',  // Fall back to Sinhala instead of English
     interpolation: {
       escapeValue: false
     }
