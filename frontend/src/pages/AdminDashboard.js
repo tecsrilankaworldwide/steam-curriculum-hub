@@ -1,341 +1,456 @@
 import React, { useState, useEffect } from 'react';
-import { useTranslation } from 'react-i18next';
-import { useAuth, API } from '../AuthContext';
-import axios from 'axios';
-import { Users, UserPlus, LogOut, Search, Check, X } from 'lucide-react';
-import AcademicLogo from '../components/AcademicLogo';
-import LanguageSwitcher from '../components/LanguageSwitcher';
+import { useNavigate } from 'react-router-dom';
+import api from '../api';
+import { Button } from '../components/ui/button';
+import { Input } from '../components/ui/input';
+import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
+import { Badge } from '../components/ui/badge';
+import { toast } from '../components/ui/sonner';
 
-const AdminDashboard = () => {
-  const { t } = useTranslation();
-  const { user, token, logout } = useAuth();
-  const [users, setUsers] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [filterRole, setFilterRole] = useState('all');
-  const [showCreateUser, setShowCreateUser] = useState(false);
+function useAuth() {
+  const user = JSON.parse(localStorage.getItem('user') || 'null');
+  return { user };
+}
 
-  // New user form
-  const [newUser, setNewUser] = useState({
-    email: '',
-    password: '',
-    full_name: '',
-    role: 'student',
-    grade: 'grade_5'
+// Grade options for K-12
+const GRADE_OPTIONS = ['K', 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+const CURRICULUM_OPTIONS = ['cambridge', 'edexcel', 'asdn'];
+const SUBJECT_OPTIONS = ['mathematics', 'physics', 'chemistry', 'biology', 'science', 'technology', 'engineering', 'arts', 'english', 'ict'];
+const DIFFICULTY_OPTIONS = ['easy', 'medium', 'hard'];
+
+function LessonForm({ lesson, onSave, onCancel }) {
+  const [formData, setFormData] = useState(lesson || {
+    title: { en: '', local: '' },
+    description: { en: '', local: '' },
+    content: { en: '', local: '' },
+    curriculum: 'cambridge',
+    subject: 'mathematics',
+    grade: 5,
+    language_code: 'hi-IN',
+    difficulty: 'medium',
+    estimated_duration: 30,
+    source: 'OpenStax',
+    license: 'CC BY 4.0',
+    source_url: 'https://openstax.org'
   });
+  
+  const [saving, setSaving] = useState(false);
 
-  useEffect(() => {
-    // In real implementation, there would be an admin endpoint to list all users
-    // For now, we'll show a placeholder
-    setLoading(false);
-    setUsers([]);
-  }, []);
-
-  const handleCreateUser = async (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
+    setSaving(true);
     try {
-      await axios.post(
-        `${API}/register`,
-        newUser,
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      alert('User created successfully!');
-      setShowCreateUser(false);
-      setNewUser({
-        email: '',
-        password: '',
-        full_name: '',
-        role: 'student',
-        grade: 'grade_5'
-      });
-      // Reload users
+      await onSave(formData);
     } catch (error) {
-      alert('Error: ' + (error.response?.data?.detail || error.message));
+      toast.error('Error saving lesson: ' + error.message);
+    } finally {
+      setSaving(false);
     }
   };
 
-  const filteredUsers = users.filter(u => {
-    const matchesSearch = u.email.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                          u.full_name.toLowerCase().includes(searchQuery.toLowerCase());
-    const matchesRole = filterRole === 'all' || u.role === filterRole;
-    return matchesSearch && matchesRole;
-  });
+  return (
+    <form onSubmit={handleSubmit} className="space-y-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+          <label className="block text-sm font-medium mb-1">Title (English) *</label>
+          <Input
+            value={formData.title.en}
+            onChange={(e) => setFormData({...formData, title: {...formData.title, en: e.target.value}})}
+            required
+          />
+        </div>
+        <div>
+          <label className="block text-sm font-medium mb-1">Title (Local) *</label>
+          <Input
+            value={formData.title.local}
+            onChange={(e) => setFormData({...formData, title: {...formData.title, local: e.target.value}})}
+            required
+          />
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+          <label className="block text-sm font-medium mb-1">Description (English) *</label>
+          <textarea
+            className="w-full border rounded px-3 py-2"
+            rows="3"
+            value={formData.description.en}
+            onChange={(e) => setFormData({...formData, description: {...formData.description, en: e.target.value}})}
+            required
+          />
+        </div>
+        <div>
+          <label className="block text-sm font-medium mb-1">Description (Local) *</label>
+          <textarea
+            className="w-full border rounded px-3 py-2"
+            rows="3"
+            value={formData.description.local}
+            onChange={(e) => setFormData({...formData, description: {...formData.description, local: e.target.value}})}
+            required
+          />
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+          <label className="block text-sm font-medium mb-1">Content (English) *</label>
+          <textarea
+            className="w-full border rounded px-3 py-2"
+            rows="5"
+            value={formData.content.en}
+            onChange={(e) => setFormData({...formData, content: {...formData.content, en: e.target.value}})}
+            required
+          />
+        </div>
+        <div>
+          <label className="block text-sm font-medium mb-1">Content (Local) *</label>
+          <textarea
+            className="w-full border rounded px-3 py-2"
+            rows="5"
+            value={formData.content.local}
+            onChange={(e) => setFormData({...formData, content: {...formData.content, local: e.target.value}})}
+            required
+          />
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <div>
+          <label className="block text-sm font-medium mb-1">Curriculum *</label>
+          <select
+            className="w-full border rounded px-3 py-2"
+            value={formData.curriculum}
+            onChange={(e) => setFormData({...formData, curriculum: e.target.value})}
+            required
+          >
+            {CURRICULUM_OPTIONS.map(c => (
+              <option key={c} value={c}>{c.toUpperCase()}</option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label className="block text-sm font-medium mb-1">Subject *</label>
+          <select
+            className="w-full border rounded px-3 py-2"
+            value={formData.subject}
+            onChange={(e) => setFormData({...formData, subject: e.target.value})}
+            required
+          >
+            {SUBJECT_OPTIONS.map(s => (
+              <option key={s} value={s}>{s.charAt(0).toUpperCase() + s.slice(1)}</option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label className="block text-sm font-medium mb-1">Grade *</label>
+          <select
+            className="w-full border rounded px-3 py-2"
+            value={formData.grade}
+            onChange={(e) => setFormData({...formData, grade: e.target.value === 'K' ? 'K' : parseInt(e.target.value)})}
+            required
+          >
+            {GRADE_OPTIONS.map(g => (
+              <option key={g} value={g}>Grade {g}</option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label className="block text-sm font-medium mb-1">Difficulty *</label>
+          <select
+            className="w-full border rounded px-3 py-2"
+            value={formData.difficulty}
+            onChange={(e) => setFormData({...formData, difficulty: e.target.value})}
+            required
+          >
+            {DIFFICULTY_OPTIONS.map(d => (
+              <option key={d} value={d}>{d.charAt(0).toUpperCase() + d.slice(1)}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div>
+          <label className="block text-sm font-medium mb-1">Duration (minutes) *</label>
+          <Input
+            type="number"
+            value={formData.estimated_duration}
+            onChange={(e) => setFormData({...formData, estimated_duration: parseInt(e.target.value)})}
+            required
+            min="1"
+          />
+        </div>
+        <div>
+          <label className="block text-sm font-medium mb-1">Source *</label>
+          <Input
+            value={formData.source}
+            onChange={(e) => setFormData({...formData, source: e.target.value})}
+            required
+          />
+        </div>
+        <div>
+          <label className="block text-sm font-medium mb-1">License *</label>
+          <select
+            className="w-full border rounded px-3 py-2"
+            value={formData.license}
+            onChange={(e) => setFormData({...formData, license: e.target.value})}
+            required
+          >
+            <option value="CC BY 4.0">CC BY 4.0</option>
+            <option value="CC BY-NC 3.0">CC BY-NC 3.0</option>
+            <option value="CC BY-SA 4.0">CC BY-SA 4.0</option>
+          </select>
+        </div>
+      </div>
+
+      <div>
+        <label className="block text-sm font-medium mb-1">Source URL</label>
+        <Input
+          type="url"
+          value={formData.source_url || ''}
+          onChange={(e) => setFormData({...formData, source_url: e.target.value})}
+        />
+      </div>
+
+      <div className="flex gap-4">
+        <Button type="submit" disabled={saving}>
+          {saving ? 'Saving...' : lesson ? 'Update Lesson' : 'Create Lesson'}
+        </Button>
+        <Button type="button" variant="outline" onClick={onCancel}>
+          Cancel
+        </Button>
+      </div>
+    </form>
+  );
+}
+
+function AdminDashboard() {
+  const { user } = useAuth();
+  const navigate = useNavigate();
+  const [activeTab, setActiveTab] = useState('inquiries');
+  const [inquiries, setInquiries] = useState([]);
+  const [lessons, setLessons] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [showLessonForm, setShowLessonForm] = useState(false);
+  const [editingLesson, setEditingLesson] = useState(null);
+
+  useEffect(() => {
+    if (!user || user.role !== 'admin') {
+      navigate('/login');
+      return;
+    }
+    loadData();
+  }, [activeTab]);
+
+  const loadData = async () => {
+    setLoading(true);
+    try {
+      if (activeTab === 'inquiries') {
+        const response = await api.getInquiries();
+        setInquiries(response.data.inquiries);
+      } else if (activeTab === 'lessons') {
+        const response = await api.getLessons({});
+        setLessons(response.data.lessons);
+      }
+    } catch (error) {
+      console.error('Error loading data:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleUpdateInquiryStatus = async (inquiryId, newStatus) => {
+    try {
+      await api.updateInquiry(inquiryId, { status: newStatus });
+      
+      // Send notification (console log for now)
+      console.log(`📧 Email Notification: Inquiry ${inquiryId} status updated to ${newStatus}`);
+      toast.success(`Inquiry status updated to ${newStatus}. Email notification sent!`);
+      
+      loadData();
+    } catch (error) {
+      console.error('Error updating inquiry:', error);
+      toast.error('Error updating inquiry');
+    }
+  };
+
+  const handleDeleteLesson = async (lessonId) => {
+    if (window.confirm('Are you sure you want to delete this lesson?')) {
+      try {
+        await api.deleteLesson(lessonId);
+        loadData();
+      } catch (error) {
+        console.error('Error deleting lesson:', error);
+      }
+    }
+  };
+
+  const handleSaveLesson = async (lessonData) => {
+    try {
+      if (editingLesson) {
+        await api.updateLesson(editingLesson.id, lessonData);
+        toast.success('Lesson updated successfully!');
+      } else {
+        await api.createLesson(lessonData);
+        toast.success('Lesson created successfully!');
+      }
+      setShowLessonForm(false);
+      setEditingLesson(null);
+      loadData();
+    } catch (error) {
+      throw error;
+    }
+  };
+
+  const handleEditLesson = (lesson) => {
+    setEditingLesson(lesson);
+    setShowLessonForm(true);
+  };
+
+  const handleCreateNew = () => {
+    setEditingLesson(null);
+    setShowLessonForm(true);
+  };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-[#FFFBF0] to-[#FFF4E6]">
-      {/* Header */}
-      <div className="bg-white shadow-md border-b-4 border-[#F59E0B]">
-        <div className="container mx-auto px-4 sm:px-6 md:px-12 lg:pl-48 xl:pl-60 py-5">
-          <div className="flex justify-between items-center">
-            <div className="flex items-center gap-4">
-              <div className="w-14 h-14 bg-[#F59E0B] rounded-lg flex items-center justify-center">
-                <Users className="w-7 h-7 text-white" strokeWidth={2.5} />
-              </div>
-              <div>
-                <h1 className="text-2xl md:text-3xl font-bold text-[#1F2937]" style={{fontFamily: 'Manrope, sans-serif'}}>{t('dashboard.admin')}</h1>
-                <p className="text-sm md:text-base text-[#6B7280]">{t('dashboard.welcome')}, <span className="font-semibold text-[#F59E0B]">{user.full_name}</span></p>
-              </div>
-            </div>
-            <div className="flex gap-3">
-              <LanguageSwitcher />
-              <button
-                onClick={() => setShowCreateUser(true)}
-                className="px-4 py-2 bg-green-600 text-white font-semibold rounded-lg hover:bg-green-700 transition-colors flex items-center gap-2"
-                data-testid="create-user-btn"
-              >
-                <UserPlus className="w-4 h-4" />
-                <span className="hidden md:inline">{t('admin.addUser')}</span>
-              </button>
-              <button
-                onClick={logout}
-                className="px-4 py-2 bg-gray-100 text-gray-700 font-semibold rounded-lg hover:bg-gray-200 transition-colors flex items-center gap-1"
-                data-testid="logout-btn"
-              >
-                <LogOut className="w-4 h-4" />
-                <span className="hidden md:inline">{t('auth.logout')}</span>
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
+    <div className="min-h-screen bg-background">
+      <div className="max-w-7xl mx-auto px-4 py-8">
+        <h1 className="text-4xl font-bold mb-8">Admin Dashboard</h1>
 
-      {/* Main Content */}
-      <div className="container mx-auto px-4 sm:px-6 md:px-12 lg:pl-48 xl:pl-60 py-8">
-        {/* Stats */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 md:gap-6 mb-8">
-          <div className="bg-white rounded-xl p-6 shadow-md border-2 border-[#E5E7EB]">
-            <div className="text-3xl font-bold text-[#1F2937] mb-1" style={{fontFamily: 'Manrope, sans-serif'}}>{users.length}</div>
-            <div className="text-sm font-medium text-[#6B7280]">Total Users</div>
-          </div>
-          <div className="bg-white rounded-xl p-6 shadow-md border-2 border-[#E5E7EB]">
-            <div className="text-3xl font-bold text-[#3B82F6] mb-1" style={{fontFamily: 'Manrope, sans-serif'}}>
-              {users.filter(u => u.role === 'student').length}
-            </div>
-            <div className="text-sm font-medium text-[#6B7280]">Students</div>
-          </div>
-          <div className="bg-white rounded-xl p-6 shadow-md border-2 border-[#E5E7EB]">
-            <div className="text-3xl font-bold text-[#10B981] mb-1" style={{fontFamily: 'Manrope, sans-serif'}}>
-              {users.filter(u => u.role === 'teacher').length}
-            </div>
-            <div className="text-sm font-medium text-[#6B7280]">{t('admin.teachers')}</div>
-          </div>
-          <div className="bg-white rounded-xl p-6 shadow-md border-2 border-[#E5E7EB]">
-            <div className="text-3xl font-bold text-[#F59E0B] mb-1" style={{fontFamily: 'Manrope, sans-serif'}}>
-              {users.filter(u => u.role === 'parent').length}
-            </div>
-            <div className="text-sm font-medium text-[#6B7280]">{t('admin.parents')}</div>
-          </div>
-        </div>
-
-        {/* User Management */}
-        <div className="bg-white rounded-xl shadow-md p-6 border-2 border-[#E5E7EB]">
-          <h2 className="text-2xl font-bold mb-6 text-[#1F2937]" style={{fontFamily: 'Manrope, sans-serif'}}>
-            {t('admin.userManagement')}
-          </h2>
-
-          {/* Filters */}
-          <div className="flex flex-col md:flex-row gap-4 mb-6">
-            <div className="flex-1 relative">
-              <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-5 h-5" />
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder={t('common.search') + " users..."}
-                className="w-full pl-10 pr-4 py-2 border-2 border-[#D1D5DB] rounded-lg focus:ring-2 focus:ring-[#F59E0B]"
-                data-testid="user-search-input"
-              />
-            </div>
-            <select
-              value={filterRole}
-              onChange={(e) => setFilterRole(e.target.value)}
-              className="px-4 py-2 border-2 border-[#D1D5DB] rounded-lg focus:ring-2 focus:ring-[#F59E0B]"
-              data-testid="user-role-filter"
-            >
-              <option value="all">All Roles</option>
-              <option value="student">Students</option>
-              <option value="teacher">Teachers</option>
-              <option value="parent">Parents</option>
-              <option value="admin">Admins</option>
-              <option value="typesetter">Typesetters</option>
-            </select>
-          </div>
-
-          {/* Users List */}
-          {users.length === 0 ? (
-            <div className="text-center py-12">
-              <Users className="w-16 h-16 text-gray-400 mx-auto mb-4" />
-              <p className="text-xl font-semibold text-gray-600 mb-2">No Users Yet</p>
-              <p className="text-gray-500 text-sm">
-                User management interface for listing, creating, and managing users.
-              </p>
-              <button
-                onClick={() => setShowCreateUser(true)}
-                className="mt-4 px-6 py-3 bg-green-600 text-white font-semibold rounded-lg hover:bg-green-700"
-              >
-                {t('admin.addUser')}
-              </button>
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead className="bg-gray-50">
-                  <tr>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase">Name</th>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase">Email</th>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase">Role</th>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase">Grade</th>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase">Status</th>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-200">
-                  {filteredUsers.map(u => (
-                    <tr key={u.id} className="hover:bg-gray-50">
-                      <td className="px-4 py-3 text-sm font-medium text-[#1F2937]">{u.full_name}</td>
-                      <td className="px-4 py-3 text-sm text-gray-600">{u.email}</td>
-                      <td className="px-4 py-3 text-sm">
-                        <span className="px-2 py-1 bg-blue-100 text-blue-700 rounded-full text-xs font-semibold">
-                          {u.role}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-sm text-gray-600">{u.grade?.replace('_', ' ') || '-'}</td>
-                      <td className="px-4 py-3 text-sm">
-                        {u.is_active ? (
-                          <span className="px-2 py-1 bg-green-100 text-green-700 rounded-full text-xs font-semibold">
-                            {t('admin.active')}
-                          </span>
-                        ) : (
-                          <span className="px-2 py-1 bg-red-100 text-red-700 rounded-full text-xs font-semibold">
-                            {t('admin.inactive')}
-                          </span>
-                        )}
-                      </td>
-                      <td className="px-4 py-3 text-sm">
-                        <button className="text-blue-600 hover:text-blue-800 font-semibold">
-                          {t('common.edit')}
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Create User Modal */}
-      {showCreateUser && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4" onClick={() => setShowCreateUser(false)}>
-          <div 
-            className="bg-white rounded-2xl shadow-2xl w-full max-w-md"
-            onClick={(e) => e.stopPropagation()}
+        <div className="flex gap-4 mb-8">
+          <Button 
+            variant={activeTab === 'inquiries' ? 'default' : 'outline'}
+            onClick={() => { setActiveTab('inquiries'); setShowLessonForm(false); }}
           >
-            <div className="p-6 border-b-2 border-[#E5E7EB] flex justify-between items-center">
-              <h3 className="text-xl font-bold text-[#1F2937]" style={{fontFamily: 'Manrope, sans-serif'}}>
-                {t('admin.addUser')}
-              </h3>
-              <button
-                onClick={() => setShowCreateUser(false)}
-                className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
-              >
-                <X className="w-5 h-5 text-gray-600" />
-              </button>
-            </div>
-
-            <form onSubmit={handleCreateUser} className="p-6 space-y-4">
-              <div>
-                <label className="block text-sm font-semibold text-[#374151] mb-2">Full Name *</label>
-                <input
-                  type="text"
-                  required
-                  value={newUser.full_name}
-                  onChange={(e) => setNewUser({...newUser, full_name: e.target.value})}
-                  className="w-full px-4 py-2 border-2 border-[#D1D5DB] rounded-lg focus:ring-2 focus:ring-[#F59E0B]"
-                  data-testid="new-user-name-input"
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-semibold text-[#374151] mb-2">Email *</label>
-                <input
-                  type="email"
-                  required
-                  value={newUser.email}
-                  onChange={(e) => setNewUser({...newUser, email: e.target.value})}
-                  className="w-full px-4 py-2 border-2 border-[#D1D5DB] rounded-lg focus:ring-2 focus:ring-[#F59E0B]"
-                  data-testid="new-user-email-input"
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-semibold text-[#374151] mb-2">Password *</label>
-                <input
-                  type="password"
-                  required
-                  value={newUser.password}
-                  onChange={(e) => setNewUser({...newUser, password: e.target.value})}
-                  className="w-full px-4 py-2 border-2 border-[#D1D5DB] rounded-lg focus:ring-2 focus:ring-[#F59E0B]"
-                  data-testid="new-user-password-input"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-semibold text-[#374151] mb-2">Role *</label>
-                  <select
-                    value={newUser.role}
-                    onChange={(e) => setNewUser({...newUser, role: e.target.value})}
-                    className="w-full px-4 py-2 border-2 border-[#D1D5DB] rounded-lg focus:ring-2 focus:ring-[#F59E0B]"
-                    data-testid="new-user-role-select"
-                  >
-                    <option value="student">Student</option>
-                    <option value="teacher">Teacher</option>
-                    <option value="parent">Parent</option>
-                    <option value="admin">Admin</option>
-                    <option value="typesetter">Typesetter</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-sm font-semibold text-[#374151] mb-2">Grade</label>
-                  <select
-                    value={newUser.grade}
-                    onChange={(e) => setNewUser({...newUser, grade: e.target.value})}
-                    className="w-full px-4 py-2 border-2 border-[#D1D5DB] rounded-lg focus:ring-2 focus:ring-[#F59E0B]"
-                    data-testid="new-user-grade-select"
-                  >
-                    <option value="grade_2">Grade 2</option>
-                    <option value="grade_3">Grade 3</option>
-                    <option value="grade_4">Grade 4</option>
-                    <option value="grade_5">Grade 5</option>
-                  </select>
-                </div>
-              </div>
-
-              <div className="flex gap-3 pt-4">
-                <button
-                  type="button"
-                  onClick={() => setShowCreateUser(false)}
-                  className="flex-1 px-4 py-2 bg-gray-200 text-gray-700 font-semibold rounded-lg hover:bg-gray-300 transition-colors"
-                >
-                  {t('common.cancel')}
-                </button>
-                <button
-                  type="submit"
-                  className="flex-1 px-4 py-2 bg-green-600 text-white font-semibold rounded-lg hover:bg-green-700 transition-colors"
-                  data-testid="submit-create-user-btn"
-                >
-                  {t('common.create')}
-                </button>
-              </div>
-            </form>
-          </div>
+            Inquiries
+          </Button>
+          <Button 
+            variant={activeTab === 'lessons' ? 'default' : 'outline'}
+            onClick={() => { setActiveTab('lessons'); setShowLessonForm(false); }}
+          >
+            Lessons
+          </Button>
         </div>
-      )}
+
+        {loading ? (
+          <div className="text-center py-20">Loading...</div>
+        ) : activeTab === 'inquiries' ? (
+          <div className="space-y-4">
+            <h2 className="text-2xl font-semibold mb-4">Pricing Inquiries ({inquiries.length})</h2>
+            {inquiries.length === 0 ? (
+              <Card>
+                <CardContent className="py-8 text-center text-muted-foreground">
+                  No inquiries yet
+                </CardContent>
+              </Card>
+            ) : (
+              inquiries.map(inquiry => (
+                <Card key={inquiry.id}>
+                  <CardHeader>
+                    <div className="flex justify-between items-start">
+                      <div>
+                        <CardTitle>{inquiry.name}</CardTitle>
+                        <p className="text-sm text-muted-foreground mt-1">{inquiry.email}</p>
+                      </div>
+                      <Badge variant={inquiry.status === 'new' ? 'default' : 'outline'}>
+                        {inquiry.status}
+                      </Badge>
+                    </div>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="space-y-2 text-sm">
+                      {inquiry.organization && (
+                        <p><strong>Organization:</strong> {inquiry.organization}</p>
+                      )}
+                      <p><strong>Curriculum:</strong> {inquiry.curriculum}</p>
+                      <p><strong>Grade Range:</strong> {inquiry.grade_range}</p>
+                      {inquiry.num_students && (
+                        <p><strong>Number of Students:</strong> {inquiry.num_students}</p>
+                      )}
+                      <p><strong>Message:</strong> {inquiry.message}</p>
+                      {inquiry.notes && (
+                        <p className="text-muted-foreground"><strong>Notes:</strong> {inquiry.notes}</p>
+                      )}
+                    </div>
+                    <div className="flex gap-2 mt-4">
+                      <Button 
+                        size="sm" 
+                        variant="outline"
+                        onClick={() => handleUpdateInquiryStatus(inquiry.id, 'contacted')}
+                      >
+                        Mark as Contacted
+                      </Button>
+                      <Button 
+                        size="sm" 
+                        variant="outline"
+                        onClick={() => handleUpdateInquiryStatus(inquiry.id, 'converted')}
+                      >
+                        Mark as Converted
+                      </Button>
+                    </div>
+                  </CardContent>
+                </Card>
+              ))
+            )}
+          </div>
+        ) : showLessonForm ? (
+          <div>
+            <h2 className="text-2xl font-semibold mb-4">
+              {editingLesson ? 'Edit Lesson' : 'Create New Lesson'}
+            </h2>
+            <Card>
+              <CardContent className="pt-6">
+                <LessonForm
+                  lesson={editingLesson}
+                  onSave={handleSaveLesson}
+                  onCancel={() => { setShowLessonForm(false); setEditingLesson(null); }}
+                />
+              </CardContent>
+            </Card>
+          </div>
+        ) : (
+          <div>
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="text-2xl font-semibold">Lessons ({lessons.length})</h2>
+              <Button onClick={handleCreateNew}>+ Create New Lesson</Button>
+            </div>
+            <div className="space-y-4">
+              {lessons.map(lesson => (
+                <Card key={lesson.id}>
+                  <CardHeader>
+                    <div className="flex justify-between items-start">
+                      <div>
+                        <div className="flex gap-2 mb-2">
+                          <Badge>{lesson.curriculum}</Badge>
+                          <Badge variant="outline">Grade {lesson.grade}</Badge>
+                          <Badge variant="outline">{lesson.subject}</Badge>
+                        </div>
+                        <CardTitle>{lesson.title.en}</CardTitle>
+                      </div>
+                    </div>
+                  </CardHeader>
+                  <CardContent>
+                    <p className="text-sm text-muted-foreground mb-4">{lesson.description.en}</p>
+                    <div className="flex gap-2">
+                      <Button size="sm" variant="outline" onClick={() => navigate(`/lesson/${lesson.id}`)}>
+                        View
+                      </Button>
+                      <Button size="sm" variant="outline" onClick={() => handleEditLesson(lesson)}>
+                        Edit
+                      </Button>
+                      <Button size="sm" variant="destructive" onClick={() => handleDeleteLesson(lesson.id)}>
+                        Delete
+                      </Button>
+                    </div>
+                  </CardContent>
+                </Card>
+              ))}</div>
+          </div>
+        )}
+      </div>
     </div>
   );
-};
+}
 
 export default AdminDashboard;

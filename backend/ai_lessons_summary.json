@@ -1,0 +1,30 @@
+{
+  "total_lessons": 1000,
+  "batches": 6,
+  "age_groups": [
+    "5-7",
+    "8-9",
+    "10-12",
+    "13-15",
+    "16-18"
+  ],
+  "topics": [
+    "Foundations",
+    "Machine Learning",
+    "Neural Networks & Deep Learning",
+    "Computer Vision",
+    "Natural Language Processing",
+    "Reinforcement Learning",
+    "Generative AI",
+    "AI Applications",
+    "Robotics & Physical AI",
+    "AI Ethics & Society"
+  ],
+  "breakdown": {
+    "5-7": 200,
+    "8-9": 200,
+    "10-12": 200,
+    "13-15": 200,
+    "16-18": 200
+  }
+}

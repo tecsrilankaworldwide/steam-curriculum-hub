@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Browser TTS POC - 20 Languages Test</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            padding: 40px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        }
+        
+        h1 {
+            text-align: center;
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 2.5em;
+        }
+        
+        .subtitle {
+            text-align: center;
+            color: #666;
+            margin-bottom: 40px;
+            font-size: 1.1em;
+        }
+        
+        .info-panel {
+            background: #f0f7ff;
+            border-left: 4px solid #667eea;
+            padding: 20px;
+            margin-bottom: 30px;
+            border-radius: 8px;
+        }
+        
+        .info-panel h3 {
+            color: #667eea;
+            margin-bottom: 10px;
+        }
+        
+        .info-panel ul {
+            margin-left: 20px;
+            color: #555;
+            line-height: 1.8;
+        }
+        
+        .display-mode {
+            margin-bottom: 30px;
+            text-align: center;
+        }
+        
+        .display-mode label {
+            margin: 0 15px;
+            font-size: 1.1em;
+            cursor: pointer;
+            color: #555;
+        }
+        
+        .display-mode input[type="radio"] {
+            margin-right: 8px;
+            cursor: pointer;
+            transform: scale(1.2);
+        }
+        
+        .language-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .language-card {
+            background: #f8f9fa;
+            border-radius: 12px;
+            padding: 20px;
+            border: 2px solid #e0e0e0;
+            transition: all 0.3s ease;
+        }
+        
+        .language-card:hover {
+            border-color: #667eea;
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.2);
+            transform: translateY(-2px);
+        }
+        
+        .language-card.rtl {
+            direction: rtl;
+            text-align: right;
+        }
+        
+        .language-name {
+            font-weight: bold;
+            font-size: 1.2em;
+            color: #333;
+            margin-bottom: 10px;
+        }
+        
+        .sample-text {
+            color: #666;
+            margin-bottom: 15px;
+            line-height: 1.6;
+            min-height: 60px;
+        }
+        
+        .button-group {
+            display: flex;
+            gap: 10px;
+        }
+        
+        button {
+            flex: 1;
+            padding: 12px 20px;
+            border: none;
+            border-radius: 8px;
+            font-size: 0.95em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        
+        .play-local {
+            background: #667eea;
+            color: white;
+        }
+        
+        .play-local:hover {
+            background: #5568d3;
+            transform: scale(1.05);
+        }
+        
+        .play-english {
+            background: #48bb78;
+            color: white;
+        }
+        
+        .play-english:hover {
+            background: #38a169;
+            transform: scale(1.05);
+        }
+        
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
+        .status {
+            margin-top: 30px;
+            padding: 20px;
+            background: #f0f7ff;
+            border-radius: 8px;
+            text-align: center;
+        }
+        
+        .status.success {
+            background: #d4edda;
+            color: #155724;
+        }
+        
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        
+        .voice-info {
+            margin-top: 15px;
+            font-size: 0.9em;
+            color: #888;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🌍 Browser TTS POC</h1>
+        <p class="subtitle">Testing Speech Synthesis API with 20 Languages</p>
+        
+        <div class="info-panel">
+            <h3>📋 Test Objectives:</h3>
+            <ul>
+                <li>Verify browser TTS works for all 20 languages</li>
+                <li>Test bilingual display (Local + English)</li>
+                <li>Test RTL rendering for Arabic, Urdu, Pashto</li>
+                <li>Validate display mode toggle functionality</li>
+            </ul>
+        </div>
+        
+        <div class="display-mode">
+            <label>
+                <input type="radio" name="displayMode" value="bilingual" checked>
+                Bilingual (Local / English)
+            </label>
+            <label>
+                <input type="radio" name="displayMode" value="local">
+                Local Only
+            </label>
+            <label>
+                <input type="radio" name="displayMode" value="english">
+                English Only
+            </label>
+        </div>
+        
+        <div class="language-grid" id="languageGrid"></div>
+        
+        <div id="status" class="status"></div>
+    </div>
+
+    <script>
+        // 20 Languages Configuration
+        const languages = [
+            { code: 'en-US', name: 'English', local: 'Welcome to STEAM Education Hub', english: 'Welcome to STEAM Education Hub', rtl: false },
+            { code: 'si-LK', name: 'Sinhala', local: 'STEAM අධ්‍යාපන මධ්‍යස්ථානයට සාදරයෙන් පිළිගනිමු', english: 'Welcome to STEAM Education Hub', rtl: false },
+            { code: 'ta-IN', name: 'Tamil', local: 'STEAM கல்வி மையத்திற்கு வரவேற்கிறோம்', english: 'Welcome to STEAM Education Hub', rtl: false },
+            { code: 'te-IN', name: 'Telugu', local: 'STEAM విద్యా కేంద్రానికి స్వాగతం', english: 'Welcome to STEAM Education Hub', rtl: false },
+            { code: 'zh-CN', name: 'Chinese', local: '欢迎来到STEAM教育中心', english: 'Welcome to STEAM Education Hub', rtl: false },
+            { code: 'ur-PK', name: 'Urdu', local: 'STEAM تعلیمی مرکز میں خوش آمدید', english: 'Welcome to STEAM Education Hub', rtl: true },
+            { code: 'fil-PH', name: 'Filipino', local: 'Maligayang pagdating sa STEAM Education Hub', english: 'Welcome to STEAM Education Hub', rtl: false },
+            { code: 'id-ID', name: 'Indonesian', local: 'Selamat datang di STEAM Education Hub', english: 'Welcome to STEAM Education Hub', rtl: false },
+            { code: 'th-TH', name: 'Thai', local: 'ยินดีต้อนรับสู่ศูนย์การศึกษา STEAM', english: 'Welcome to STEAM Education Hub', rtl: false },
+            { code: 'ar-SA', name: 'Arabic', local: 'مرحبا بكم في مركز تعليم STEAM', english: 'Welcome to STEAM Education Hub', rtl: true },
+            { code: 'hi-IN', name: 'Hindi', local: 'STEAM शिक्षा केंद्र में आपका स्वागत है', english: 'Welcome to STEAM Education Hub', rtl: false },
+            { code: 'bn-IN', name: 'Bengali', local: 'STEAM শিক্ষা কেন্দ্রে স্বাগতম', english: 'Welcome to STEAM Education Hub', rtl: false },
+            { code: 'ru-RU', name: 'Russian', local: 'Добро пожаловать в Образовательный центр STEAM', english: 'Welcome to STEAM Education Hub', rtl: false },
+            { code: 'ja-JP', name: 'Japanese', local: 'STEAM教育ハブへようこそ', english: 'Welcome to STEAM Education Hub', rtl: false },
+            { code: 'ko-KR', name: 'Korean', local: 'STEAM 교육 허브에 오신 것을 환영합니다', english: 'Welcome to STEAM Education Hub', rtl: false },
+            { code: 'vi-VN', name: 'Vietnamese', local: 'Chào mừng đến với Trung tâm Giáo dục STEAM', english: 'Welcome to STEAM Education Hub', rtl: false },
+            { code: 'ne-NP', name: 'Nepali', local: 'STEAM शिक्षा केन्द्रमा स्वागत छ', english: 'Welcome to STEAM Education Hub', rtl: false },
+            { code: 'dz-BT', name: 'Dzongkha', local: 'STEAM སློབ་གསོའི་ལྟེ་གནས་ལུ་ དངོས་སུ་བཀྲ་ཤིས་བདེ་ལེགས', english: 'Welcome to STEAM Education Hub', rtl: false },
+            { code: 'ps-AF', name: 'Pashto', local: 'د STEAM تعلیمی مرکز ته ښه راغلاست', english: 'Welcome to STEAM Education Hub', rtl: true },
+            { code: 'pa-IN', name: 'Punjabi', local: 'STEAM ਸਿੱਖਿਆ ਕੇਂਦਰ ਵਿੱਚ ਤੁਹਾਡਾ ਸਵਾਗਤ ਹੈ', english: 'Welcome to STEAM Education Hub', rtl: false }
+        ];
+
+        let currentDisplayMode = 'bilingual';
+        const synth = window.speechSynthesis;
+        let availableVoices = [];
+
+        // Load available voices
+        function loadVoices() {
+            availableVoices = synth.getVoices();
+            console.log('Available voices:', availableVoices.length);
+            updateStatus(`✅ Loaded ${availableVoices.length} voices from browser`);
+        }
+
+        // Initialize voices
+        if (synth.onvoiceschanged !== undefined) {
+            synth.onvoiceschanged = loadVoices;
+        }
+        loadVoices();
+
+        // Find best voice for language
+        function findVoice(langCode) {
+            // Try exact match
+            let voice = availableVoices.find(v => v.lang === langCode);
+            if (voice) return voice;
+            
+            // Try language prefix match (e.g., 'en' for 'en-US')
+            const langPrefix = langCode.split('-')[0];
+            voice = availableVoices.find(v => v.lang.startsWith(langPrefix));
+            if (voice) return voice;
+            
+            // Fallback to default
+            return availableVoices[0];
+        }
+
+        // Speak text
+        function speak(text, langCode, callback) {
+            // Cancel any ongoing speech
+            synth.cancel();
+            
+            const utterance = new SpeechSynthesisUtterance(text);
+            const voice = findVoice(langCode);
+            
+            if (voice) {
+                utterance.voice = voice;
+            }
+            utterance.lang = langCode;
+            utterance.rate = 0.9;
+            utterance.pitch = 1;
+            
+            utterance.onend = () => {
+                if (callback) callback();
+            };
+            
+            utterance.onerror = (event) => {
+                console.error('Speech error:', event);
+                updateStatus(`❌ Error: ${event.error}`, 'error');
+                if (callback) callback();
+            };
+            
+            synth.speak(utterance);
+        }
+
+        // Update status message
+        function updateStatus(message, type = 'success') {
+            const statusEl = document.getElementById('status');
+            statusEl.textContent = message;
+            statusEl.className = `status ${type}`;
+        }
+
+        // Get display text based on mode
+        function getDisplayText(lang) {
+            switch(currentDisplayMode) {
+                case 'bilingual':
+                    return `${lang.local} / ${lang.english}`;
+                case 'local':
+                    return lang.local;
+                case 'english':
+                    return lang.english;
+                default:
+                    return `${lang.local} / ${lang.english}`;
+            }
+        }
+
+        // Render language cards
+        function renderLanguages() {
+            const grid = document.getElementById('languageGrid');
+            grid.innerHTML = '';
+            
+            languages.forEach(lang => {
+                const card = document.createElement('div');
+                card.className = `language-card ${lang.rtl ? 'rtl' : ''}`;
+                
+                const displayText = getDisplayText(lang);
+                const voice = findVoice(lang.code);
+                const voiceInfo = voice ? `Voice: ${voice.name}` : 'No voice available';
+                
+                card.innerHTML = `
+                    <div class="language-name">${lang.name}</div>
+                    <div class="sample-text">${displayText}</div>
+                    <div class="button-group">
+                        <button class="play-local" data-lang="${lang.code}" data-text="${lang.local}">
+                            🔊 Play Local
+                        </button>
+                        <button class="play-english" data-lang="en-US" data-text="${lang.english}">
+                            🔊 Play English
+                        </button>
+                    </div>
+                    <div class="voice-info">${voiceInfo}</div>
+                `;
+                
+                grid.appendChild(card);
+            });
+            
+            // Add event listeners to buttons
+            document.querySelectorAll('.play-local, .play-english').forEach(btn => {
+                btn.addEventListener('click', function() {
+                    const text = this.getAttribute('data-text');
+                    const lang = this.getAttribute('data-lang');
+                    const langName = this.closest('.language-card').querySelector('.language-name').textContent;
+                    
+                    // Disable all buttons
+                    document.querySelectorAll('button').forEach(b => b.disabled = true);
+                    
+                    updateStatus(`🔊 Playing: ${langName}...`);
+                    
+                    speak(text, lang, () => {
+                        // Re-enable buttons
+                        document.querySelectorAll('button').forEach(b => b.disabled = false);
+                        updateStatus(`✅ Completed: ${langName}`, 'success');
+                    });
+                });
+            });
+        }
+
+        // Display mode change handler
+        document.querySelectorAll('input[name="displayMode"]').forEach(radio => {
+            radio.addEventListener('change', function() {
+                currentDisplayMode = this.value;
+                renderLanguages();
+                updateStatus(`✅ Display mode changed to: ${currentDisplayMode}`);
+            });
+        });
+
+        // Initial render
+        renderLanguages();
+        
+        // Test message
+        setTimeout(() => {
+            updateStatus('✅ POC Ready! Click any button to test TTS. Try different display modes.', 'success');
+        }, 1000);
+    </script>
+</body>
+</html>

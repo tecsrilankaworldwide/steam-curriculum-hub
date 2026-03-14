@@ -1,1211 +1,1056 @@
-"""
-Examination Evaluation Bureau - Grade 5 Scholarship Exam Platform
-Backend API - FastAPI + MongoDB
-"""
-
-from fastapi import FastAPI, HTTPException, Depends, status, File, UploadFile
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel, Field
-from typing import List, Optional, Dict
-from datetime import datetime, timedelta, timezone
-from motor.motor_asyncio import AsyncIOMotorClient
-import os
 from dotenv import load_dotenv
-import jwt
-from passlib.context import CryptContext
-import uuid
-from enum import Enum
+from pathlib import Path
+import os
 import logging
-from functools import lru_cache
-import asyncio
-from cachetools import TTLCache
+from typing import List, Optional
+from datetime import datetime, timezone
+from pydantic import BaseModel as PydanticBaseModel
 
-# Load environment variables
-load_dotenv()
-
-# MongoDB setup with connection pooling for high concurrency (1000+ users)
-MONGO_URL = os.environ.get('MONGO_URL', 'mongodb://localhost:27017')
-client = AsyncIOMotorClient(
-    MONGO_URL,
-    maxPoolSize=100,        # Maximum connections in pool
-    minPoolSize=10,         # Minimum connections to maintain
-    maxIdleTimeMS=45000,    # Close idle connections after 45s
-    waitQueueTimeoutMS=5000,# Wait 5s for connection from pool
-    serverSelectionTimeoutMS=5000,
-    connectTimeoutMS=10000,
-    socketTimeoutMS=45000
+from models import (
+    User, UserCreate, UserLogin, TokenResponse,
+    Lesson, LessonCreate, Quiz, QuizSubmission,
+    Progress, ProgressUpdate, Inquiry, InquiryCreate,
+    Certificate, BilingualText
 )
-db = client[os.environ.get('DB_NAME_EXAM', 'exam_bureau_db')]
-
-# In-memory caching for high-traffic optimization (1K concurrent users)
-# TTLCache: maxsize=1000 items, ttl=300 seconds (5 min)
-exam_cache = TTLCache(maxsize=1000, ttl=300)
-user_cache = TTLCache(maxsize=5000, ttl=60)  # Short TTL for user data
-
-async def get_cached_exams(grade: str, status: str = None):
-    """Get exams with caching for high traffic"""
-    cache_key = f"exams_{grade}_{status}"
-    if cache_key in exam_cache:
-        return exam_cache[cache_key]
-    
-    query = {"grade": grade, "is_active": True}
-    if status == "published":
-        query["is_active"] = True
-    exams = await db.exams.find(query).to_list(100)
-    exam_cache[cache_key] = exams
-    return exams
-
-def invalidate_exam_cache():
-    """Clear exam cache when exams are modified"""
-    exam_cache.clear()
-
-# Security
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-SECRET_KEY = os.environ.get('SECRET_KEY', 'exam-bureau-secret-2024')
-ALGORITHM = "HS256"
-security = HTTPBearer()
-
-# Logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# FastAPI app
-app = FastAPI(
-    title="Examination Evaluation Bureau API",
-    version="1.0.0",
-    docs_url="/api/docs",
-    redoc_url="/api/redoc",
-    openapi_url="/api/openapi.json"
+from database import (
+    db, users_collection, lessons_collection, quizzes_collection,
+    progress_collection, inquiries_collection, certificates_collection,
+    serialize_doc
+)
+from auth import (
+    hash_password, verify_password, create_access_token,
+    get_current_user, require_admin
 )
 
-# CORS - Optimized for production with environment configuration
-CORS_ORIGINS = os.environ.get("CORS_ORIGINS", "*").split(",")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=CORS_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["*"],
-    max_age=3600,  # Cache preflight requests for 1 hour
-)
+ROOT_DIR = Path(__file__).parent
+load_dotenv(ROOT_DIR / '.env')
 
-# ============================================================================
-# MODELS & ENUMS
-# ============================================================================
+# Create the main app
+app = FastAPI(title="Global STEAM Education Hub API")
 
-class UserRole(str, Enum):
-    STUDENT = "student"
-    PARENT = "parent"
-    TEACHER = "teacher"
-    TYPESETTER = "typesetter"  # New role for paper makers
-    ADMIN = "admin"
+# Create a router with the /api prefix
+api_router = APIRouter(prefix="/api")
 
-class Grade(str, Enum):
-    GRADE_2 = "grade_2"
-    GRADE_3 = "grade_3"
-    GRADE_4 = "grade_4"
-    GRADE_5 = "grade_5"
+# Health check
+@api_router.get("/health")
+async def health_check():
+    return {"status": "healthy", "service": "Global STEAM Education Hub API"}
 
-class SkillArea(str, Enum):
-    MATHEMATICAL_REASONING = "mathematical_reasoning"
-    LANGUAGE_PROFICIENCY = "language_proficiency"
-    GENERAL_KNOWLEDGE = "general_knowledge"
-    COMPREHENSION_SKILLS = "comprehension_skills"
-    PROBLEM_SOLVING = "problem_solving"
-    LOGICAL_THINKING = "logical_thinking"
-    SPATIAL_REASONING = "spatial_reasoning"
-    MEMORY_RECALL = "memory_recall"
-    ANALYTICAL_SKILLS = "analytical_skills"
-    CRITICAL_THINKING = "critical_thinking"
-
-class ExamStatus(str, Enum):
-    DRAFT = "draft"
-    PUBLISHED = "published"
-    CLOSED = "closed"
-
-class Language(str, Enum):
-    ENGLISH = "en"
-    SINHALA = "si"
-    TAMIL = "ta"
-
-class User(BaseModel):
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    email: str
-    full_name: str
-    role: UserRole
-    hashed_password: Optional[str] = None  # Optional for response models
-    grade: Optional[Grade] = None  # For students
-    parent_id: Optional[str] = None  # Link student to parent
-    assigned_language: Optional[Language] = None  # For typesetters
-    assigned_grades: Optional[List[Grade]] = None  # For typesetters
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    is_active: bool = True
-
-class UserCreate(BaseModel):
-    email: str
-    password: str
-    full_name: str
-    role: UserRole
-    grade: Optional[Grade] = None
-
-class UserLogin(BaseModel):
-    email: str
-    password: str
-
-class Token(BaseModel):
-    access_token: str
-    token_type: str
-    user: dict
-
-class MCQOption(BaseModel):
-    option_id: str
-    text: str
-    is_correct: bool
-
-class MCQQuestion(BaseModel):
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    question_number: int
-    question_text: str
-    options: List[MCQOption]  # 5 options
-    correct_option_id: str
-    skill_area: SkillArea
-    marks: int = 1
-
-class Exam(BaseModel):
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    title: str
-    grade: Grade
-    month: str  # e.g., "2024-01" for January 2024
-    paper1_questions: List[MCQQuestion] = []  # 60 questions (old format - kept for backward compatibility)
-    paper2_essay_prompt: str = ""  # 1 essay question
-    paper2_short_questions: List[str] = []  # 10 short answer prompts
-    
-    # NEW: PDF-based exam support
-    exam_format: str = "mcq"  # "mcq" or "pdf"
-    pdf_path_en: Optional[str] = None  # English PDF file path
-    pdf_path_si: Optional[str] = None  # Sinhala PDF file path
-    pdf_path_ta: Optional[str] = None  # Tamil PDF file path
-    
-    duration_minutes: int = 60  # Paper 1 duration
-    total_marks_paper1: int = 60
-    total_marks_paper2: int = 40  # Essay 20 + Short answers 20
-    status: ExamStatus = ExamStatus.DRAFT
-    created_by: str  # Teacher ID
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    published_at: Optional[datetime] = None
-    is_active: bool = True
-
-class ExamAttempt(BaseModel):
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    exam_id: str
-    student_id: str
-    started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    submitted_at: Optional[datetime] = None
-    answers: Dict[str, str] = {}  # question_id -> selected_option_id
-    time_taken_seconds: int = 0
-    score_paper1: int = 0
-    skill_scores: Dict[str, int] = {}  # skill -> score
-    is_completed: bool = False
-
-class Paper2Submission(BaseModel):
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    exam_id: str
-    student_id: str
-    submitted_via: str = "whatsapp"  # How submitted
-    whatsapp_reference: Optional[str] = None  # Message ID or note
-    teacher_id: Optional[str] = None  # Who marked it
-    essay_marks: int = 0  # Out of 20
-    short_answer_marks: List[int] = []  # 10 marks, each out of 2
-    total_marks: int = 0
-    teacher_comments: Optional[str] = None
-    marked_at: Optional[datetime] = None
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-
-# NEW: PDF Exam Models
-class ExamCreatePDF(BaseModel):
-    title: str
-    grade: Grade
-    month: str
-    duration_minutes: int = 60
-    total_marks_paper1: int = 60
-
-class PDFUploadResponse(BaseModel):
-    message: str
-    exam_id: str
-    language: Language
-    pdf_path: str
-
-# ============================================================================
-# AUTH HELPERS
-# ============================================================================
-
-def get_password_hash(password: str) -> str:
-    return pwd_context.hash(password)
-
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
-
-def create_access_token(data: dict) -> str:
-    to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + timedelta(days=7)
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-
-async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    try:
-        token = credentials.credentials
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id = payload.get("sub")
-        
-        if not user_id:
-            raise HTTPException(status_code=401, detail="Invalid token")
-        
-        user_doc = await db.users.find_one({"id": user_id}, {"_id": 0, "hashed_password": 0})
-        if not user_doc:
-            raise HTTPException(status_code=401, detail="User not found")
-        
-        # Convert datetime string to datetime object if needed
-        if isinstance(user_doc.get('created_at'), str):
-            user_doc['created_at'] = datetime.fromisoformat(user_doc['created_at'].replace('Z', '+00:00'))
-        
-        return User(**user_doc)
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expired")
-    except jwt.DecodeError:
-        raise HTTPException(status_code=401, detail="Invalid token format")
-    except Exception as e:
-        logger.error(f"Auth error: {e}")
-        raise HTTPException(status_code=401, detail="Invalid authentication")
-
-# ============================================================================
-# AUTH ENDPOINTS
-# ============================================================================
-
-@app.post("/api/register", response_model=dict)
-async def register_user(user_data: UserCreate):
-    """Register new user"""
-    # Check if email exists
-    existing = await db.users.find_one({"email": user_data.email})
-    if existing:
+# Authentication endpoints
+@api_router.post("/auth/register", response_model=TokenResponse)
+async def register(user_data: UserCreate):
+    # Check if user already exists
+    existing_user = await users_collection.find_one({"email": user_data.email})
+    if existing_user:
         raise HTTPException(status_code=400, detail="Email already registered")
     
-    # Create user
-    hashed_password = get_password_hash(user_data.password)
+    # Create new user
+    user = User(
+        email=user_data.email,
+        password_hash=hash_password(user_data.password),
+        name=user_data.name,
+        role=user_data.role or "student"
+    )
     
-    new_user = {
-        "id": str(uuid.uuid4()),
-        "email": user_data.email,
-        "full_name": user_data.full_name,
-        "role": user_data.role.value,
-        "grade": user_data.grade.value if user_data.grade else None,
-        "hashed_password": hashed_password,
-        "created_at": datetime.now(timezone.utc),
-        "is_active": True
-    }
+    user_dict = user.model_dump()
+    user_dict['created_at'] = user_dict['created_at'].isoformat()
     
-    await db.users.insert_one(new_user)
+    await users_collection.insert_one(user_dict)
     
-    new_user.pop("hashed_password")
-    return new_user
+    # Create access token
+    token = create_access_token(
+        data={"sub": user.id, "email": user.email, "role": user.role}
+    )
+    
+    user_response = user.model_dump()
+    del user_response['password_hash']
+    
+    return TokenResponse(access_token=token, user=user_response)
 
-@app.post("/api/login", response_model=Token)
-async def login(login_data: UserLogin):
-    """Login user"""
-    user_doc = await db.users.find_one({"email": login_data.email})
+@api_router.post("/auth/login", response_model=TokenResponse)
+async def login(credentials: UserLogin):
+    # Find user
+    user_doc = await users_collection.find_one({"email": credentials.email})
+    if not user_doc:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
     
-    if not user_doc or not verify_password(login_data.password, user_doc["hashed_password"]):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+    # Verify password
+    if not verify_password(credentials.password, user_doc['password_hash']):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
     
-    if not user_doc.get("is_active", True):
-        raise HTTPException(status_code=403, detail="Account inactive")
+    # Create access token
+    token = create_access_token(
+        data={"sub": user_doc['id'], "email": user_doc['email'], "role": user_doc['role']}
+    )
     
-    # Create token
-    access_token = create_access_token({"sub": user_doc["id"]})
+    user_response = serialize_doc(user_doc)
+    del user_response['password_hash']
     
-    user_doc.pop("_id", None)
-    user_doc.pop("hashed_password", None)
-    
-    return {
-        "access_token": access_token,
-        "token_type": "bearer",
-        "user": user_doc
-    }
+    return TokenResponse(access_token=token, user=user_response)
 
-# ============================================================================
-# EXAM MANAGEMENT (TEACHER/ADMIN)
-# ============================================================================
-
-@app.post("/api/exams/create")
-async def create_exam(exam_data: dict, current_user: User = Depends(get_current_user)):
-    """Create new exam (teacher/admin only)"""
-    if current_user.role not in [UserRole.TEACHER, UserRole.ADMIN]:
-        raise HTTPException(status_code=403, detail="Only teachers/admins can create exams")
-    
-    exam = {
-        "id": str(uuid.uuid4()),
-        "title": exam_data["title"],
-        "grade": exam_data["grade"],
-        "month": exam_data["month"],
-        "paper1_questions": exam_data.get("paper1_questions", []),
-        "paper2_essay_prompt": exam_data.get("paper2_essay_prompt", ""),
-        "paper2_short_questions": exam_data.get("paper2_short_questions", []),
-        "duration_minutes": exam_data.get("duration_minutes", 60),
-        "total_marks_paper1": exam_data.get("total_marks_paper1", 60),
-        "total_marks_paper2": exam_data.get("total_marks_paper2", 40),
-        "status": "draft",
-        "created_by": current_user.id,
-        "created_at": datetime.now(timezone.utc)
-    }
-    
-    await db.exams.insert_one(exam)
-    exam.pop("_id")
-    return exam
-
-@app.get("/api/exams")
-async def list_exams(grade: Optional[str] = None, status: Optional[str] = None):
-    """List exams (filter by grade/status)"""
-    query = {}
+# Lessons endpoints
+@api_router.get("/lessons")
+async def get_lessons(
+    curriculum: Optional[str] = Query(None),
+    subject: Optional[str] = Query(None),
+    grade: Optional[int] = Query(None),
+    language: Optional[str] = Query(None),
+    query: Optional[str] = Query(None),
+    age_group: Optional[str] = Query(None),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, le=100)
+):
+    # Build filter
+    filters = {}
+    if curriculum:
+        filters['curriculum'] = curriculum
+    if subject:
+        filters['subject'] = subject
     if grade:
-        query["grade"] = grade
-    if status:
-        query["status"] = status
+        filters['grade'] = grade
+    if language:
+        filters['language_code'] = language
+    if age_group:
+        filters['age_group'] = age_group
     
-    exams = await db.exams.find(query, {"_id": 0}).sort("created_at", -1).to_list(100)
-    return {"exams": exams}
-
-@app.get("/api/exams/{exam_id}")
-async def get_exam(exam_id: str):
-    """Get exam details"""
-    exam = await db.exams.find_one({"id": exam_id}, {"_id": 0})
-    if not exam:
-        raise HTTPException(status_code=404, detail="Exam not found")
-    return exam
-
-@app.put("/api/exams/{exam_id}/publish")
-async def publish_exam(exam_id: str, current_user: User = Depends(get_current_user)):
-    """Publish exam (make available to students)"""
-    if current_user.role not in [UserRole.TEACHER, UserRole.ADMIN]:
-        raise HTTPException(status_code=403, detail="Unauthorized")
+    # Get lessons - sort by ID to show random variety instead of alphabetical repetition
+    # This prevents showing 5 versions of same lesson (different grades) consecutively
+    cursor = lessons_collection.find(filters, {"_id": 0}).sort([("id", 1)])
     
-    result = await db.exams.update_one(
-        {"id": exam_id},
-        {
-            "$set": {
-                "status": "published",
-                "published_at": datetime.now(timezone.utc)
-            }
-        }
+    # Apply pagination
+    cursor = cursor.skip(skip).limit(limit)
+    
+    lessons = await cursor.to_list(length=limit)
+    
+    # Filter by query if provided
+    if query and lessons:
+        query_lower = query.lower()
+        lessons = [
+            lesson for lesson in lessons
+            if query_lower in lesson.get('title', {}).get('en', '').lower()
+            or query_lower in lesson.get('title', {}).get('local', '').lower()
+            or query_lower in lesson.get('description', {}).get('en', '').lower()
+        ]
+    
+    return {"lessons": serialize_doc(lessons), "count": len(lessons)}
+
+@api_router.get("/lessons/{lesson_id}")
+async def get_lesson(lesson_id: str):
+    lesson = await lessons_collection.find_one({"id": lesson_id}, {"_id": 0})
+    if not lesson:
+        raise HTTPException(status_code=404, detail="Lesson not found")
+    return serialize_doc(lesson)
+
+@api_router.post("/lessons", dependencies=[Depends(require_admin)])
+async def create_lesson(lesson_data: LessonCreate):
+    lesson = Lesson(**lesson_data.model_dump())
+    lesson_dict = lesson.model_dump()
+    lesson_dict['created_at'] = lesson_dict['created_at'].isoformat()
+    lesson_dict['updated_at'] = lesson_dict['updated_at'].isoformat()
+    
+    await lessons_collection.insert_one(lesson_dict)
+    return serialize_doc(lesson_dict)
+
+@api_router.put("/lessons/{lesson_id}", dependencies=[Depends(require_admin)])
+async def update_lesson(lesson_id: str, lesson_data: LessonCreate):
+    lesson_dict = lesson_data.model_dump()
+    lesson_dict['updated_at'] = datetime.now(timezone.utc).isoformat()
+    
+    result = await lessons_collection.update_one(
+        {"id": lesson_id},
+        {"$set": lesson_dict}
     )
     
     if result.modified_count == 0:
-        raise HTTPException(status_code=404, detail="Exam not found")
+        raise HTTPException(status_code=404, detail="Lesson not found")
     
-    return {"message": "Exam published successfully"}
+    updated_lesson = await lessons_collection.find_one({"id": lesson_id}, {"_id": 0})
+    return serialize_doc(updated_lesson)
 
-# ============================================================================
-# PAPER 1 - MCQ EXAM TAKING
-# ============================================================================
+@api_router.delete("/lessons/{lesson_id}", dependencies=[Depends(require_admin)])
+async def delete_lesson(lesson_id: str):
+    result = await lessons_collection.delete_one({"id": lesson_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Lesson not found")
+    return {"message": "Lesson deleted successfully"}
 
-@app.post("/api/exams/{exam_id}/start")
-async def start_exam(exam_id: str, current_user: User = Depends(get_current_user)):
-    """Start Paper 1 MCQ exam"""
-    if current_user.role != UserRole.STUDENT:
-        raise HTTPException(status_code=403, detail="Only students can take exams")
-    
-    # Get exam
-    exam = await db.exams.find_one({"id": exam_id, "status": "published"}, {"_id": 0})
-    if not exam:
-        raise HTTPException(status_code=404, detail="Exam not found or not published")
-    
-    # Check if student already has active attempt
-    existing_attempt = await db.attempts.find_one({
-        "exam_id": exam_id,
-        "student_id": current_user.id,
-        "is_completed": False
-    })
-    
-    if existing_attempt:
-        existing_attempt.pop("_id", None)
-        # Return exam data for resume as well
-        return {
-            "attempt": existing_attempt,
-            "exam": {
-                "id": exam["id"],
-                "title": exam["title"],
-                "duration_minutes": exam["duration_minutes"],
-                "questions": exam["paper1_questions"]
-            },
-            "resume": True
-        }
-    
-    # Create new attempt
-    attempt = {
-        "id": str(uuid.uuid4()),
-        "exam_id": exam_id,
-        "student_id": current_user.id,
-        "started_at": datetime.now(timezone.utc),
-        "answers": {},
-        "time_taken_seconds": 0,
-        "is_completed": False
-    }
-    
-    await db.attempts.insert_one(attempt)
-    attempt.pop("_id")
-    
-    # Return exam questions (shuffled if needed)
-    return {
-        "attempt": attempt,
-        "exam": {
-            "id": exam["id"],
-            "title": exam["title"],
-            "duration_minutes": exam["duration_minutes"],
-            "questions": exam["paper1_questions"]
-        },
-        "resume": False
-    }
+# Quiz endpoints
+@api_router.get("/quiz/{lesson_id}")
+async def get_quiz(lesson_id: str):
+    quiz = await quizzes_collection.find_one({"lesson_id": lesson_id}, {"_id": 0})
+    if not quiz:
+        raise HTTPException(status_code=404, detail="Quiz not found for this lesson")
+    return serialize_doc(quiz)
 
-@app.post("/api/attempts/{attempt_id}/save")
-async def save_answer(
-    attempt_id: str,
-    answer_data: dict,
-    current_user: User = Depends(get_current_user)
+@api_router.post("/quiz/submit")
+async def submit_quiz(
+    submission: QuizSubmission,
+    current_user: dict = Depends(get_current_user)
 ):
-    """Save answer for a question (auto-save during exam)"""
-    attempt = await db.attempts.find_one({"id": attempt_id, "student_id": current_user.id})
+    # Get quiz
+    quiz = await quizzes_collection.find_one({"lesson_id": submission.lesson_id})
+    if not quiz:
+        raise HTTPException(status_code=404, detail="Quiz not found")
     
-    if not attempt:
-        raise HTTPException(status_code=404, detail="Attempt not found")
+    # Calculate score
+    correct_answers = 0
+    total_questions = len(quiz['questions'])
     
-    if attempt.get("is_completed"):
-        raise HTTPException(status_code=400, detail="Exam already submitted")
+    for i, answer in enumerate(submission.answers):
+        if i < len(quiz['questions']) and answer == quiz['questions'][i]['correct_answer']:
+            correct_answers += 1
     
-    # Update answer
-    question_id = answer_data["question_id"]
-    selected_option = answer_data["selected_option"]
+    score = int((correct_answers / total_questions) * 100) if total_questions > 0 else 0
+    passed = score >= quiz.get('passing_score', 70)
     
-    await db.attempts.update_one(
-        {"id": attempt_id},
-        {"$set": {f"answers.{question_id}": selected_option}}
-    )
-    
-    return {"message": "Answer saved"}
-
-@app.post("/api/attempts/{attempt_id}/submit")
-async def submit_exam(
-    attempt_id: str,
-    current_user: User = Depends(get_current_user)
-):
-    """Submit Paper 1 and auto-grade"""
-    attempt = await db.attempts.find_one({"id": attempt_id, "student_id": current_user.id})
-    
-    if not attempt:
-        raise HTTPException(status_code=404, detail="Attempt not found")
-    
-    if attempt.get("is_completed"):
-        raise HTTPException(status_code=400, detail="Already submitted")
-    
-    # Get exam with answers
-    exam = await db.exams.find_one({"id": attempt["exam_id"]}, {"_id": 0})
-    
-    # Auto-grade
-    score = 0
-    skill_scores = {skill.value: 0 for skill in SkillArea}
-    skill_totals = {skill.value: 0 for skill in SkillArea}
-    
-    for question in exam["paper1_questions"]:
-        # Handle both old and new question formats
-        q_id = question.get("id") or str(question.get("question_number", ""))
-        student_answer = attempt["answers"].get(q_id)
-        
-        # Handle both correct_option_id (new) and correct_answer (old) formats
-        correct_answer = question.get("correct_option_id") or question.get("correct_answer")
-        skill = question["skill_area"]
-        marks = question.get("marks", 1)
-        
-        skill_totals[skill] += marks
-        
-        if student_answer == correct_answer:
-            score += marks
-            skill_scores[skill] += marks
-    
-    # Calculate skill percentages
-    skill_percentages = {}
-    for skill, earned in skill_scores.items():
-        total = skill_totals[skill]
-        percentage = (earned / total * 100) if total > 0 else 0
-        skill_percentages[skill] = round(percentage, 1)
-    
-    # Calculate time taken
-    started_at = attempt["started_at"]
-    if isinstance(started_at, str):
-        started_at = datetime.fromisoformat(started_at.replace('Z', '+00:00'))
-    elif started_at.tzinfo is None:
-        started_at = started_at.replace(tzinfo=timezone.utc)
-    
-    time_taken = (datetime.now(timezone.utc) - started_at).total_seconds()
-    
-    # Update attempt
-    await db.attempts.update_one(
-        {"id": attempt_id},
+    # Update progress
+    await progress_collection.update_one(
+        {"user_id": current_user['sub'], "lesson_id": submission.lesson_id},
         {
             "$set": {
-                "submitted_at": datetime.now(timezone.utc),
-                "time_taken_seconds": int(time_taken),
-                "score_paper1": score,
-                "skill_scores": skill_scores,
-                "skill_percentages": skill_percentages,
-                "is_completed": True
+                "quiz_score": score,
+                "status": "completed" if passed else "in_progress",
+                "last_accessed": datetime.now(timezone.utc).isoformat(),
+                "completed_at": datetime.now(timezone.utc).isoformat() if passed else None
             }
-        }
+        },
+        upsert=True
     )
     
     return {
         "score": score,
-        "total": exam["total_marks_paper1"],
-        "percentage": round(score / exam["total_marks_paper1"] * 100, 1),
-        "skill_scores": skill_scores,
-        "skill_percentages": skill_percentages,
-        "time_taken_seconds": int(time_taken)
+        "passed": passed,
+        "correct_answers": correct_answers,
+        "total_questions": total_questions
     }
 
-# ============================================================================
-# PAPER 2 - MANUAL MARKING
-# ============================================================================
-
-@app.post("/api/paper2/submit-meta")
-async def submit_paper2_meta(
-    submission_data: dict,
-    current_user: User = Depends(get_current_user)
+# Progress endpoints
+@api_router.get("/progress/{user_id}")
+async def get_progress(
+    user_id: str,
+    current_user: dict = Depends(get_current_user)
 ):
-    """Student/Parent records that Paper 2 was submitted via WhatsApp"""
-    if current_user.role not in [UserRole.STUDENT, UserRole.PARENT]:
-        raise HTTPException(status_code=403, detail="Unauthorized")
+    # Users can only see their own progress unless they're admin
+    if current_user['sub'] != user_id and current_user.get('role') != 'admin':
+        raise HTTPException(status_code=403, detail="Not authorized to view this progress")
     
-    submission = {
-        "id": str(uuid.uuid4()),
-        "exam_id": submission_data["exam_id"],
-        "student_id": submission_data.get("student_id", current_user.id),
-        "submitted_via": "whatsapp",
-        "whatsapp_reference": submission_data.get("whatsapp_reference", ""),
-        "short_answer_marks": [0] * 10,  # Initialize with zeros
-        "essay_marks": 0,
-        "total_marks": 0,
-        "created_at": datetime.now(timezone.utc)
-    }
+    progress_list = await progress_collection.find(
+        {"user_id": user_id},
+        {"_id": 0}
+    ).to_list(length=1000)
     
-    await db.paper2_submissions.insert_one(submission)
-    submission.pop("_id")
-    return submission
+    return {"progress": serialize_doc(progress_list)}
 
-@app.put("/api/paper2/{submission_id}/mark")
-async def mark_paper2(
-    submission_id: str,
-    marks_data: dict,
-    current_user: User = Depends(get_current_user)
+@api_router.post("/progress/update")
+async def update_progress(
+    progress_data: ProgressUpdate,
+    current_user: dict = Depends(get_current_user)
 ):
-    """Teacher marks Paper 2"""
-    if current_user.role not in [UserRole.TEACHER, UserRole.ADMIN]:
-        raise HTTPException(status_code=403, detail="Only teachers can mark exams")
+    update_fields = {"last_accessed": datetime.now(timezone.utc).isoformat()}
     
-    essay_marks = marks_data.get("essay_marks", 0)
-    short_answer_marks = marks_data.get("short_answer_marks", [0] * 10)
-    total = essay_marks + sum(short_answer_marks)
+    if progress_data.status:
+        update_fields['status'] = progress_data.status
+        if progress_data.status == 'completed':
+            update_fields['completed_at'] = datetime.now(timezone.utc).isoformat()
     
-    await db.paper2_submissions.update_one(
-        {"id": submission_id},
+    if progress_data.quiz_score is not None:
+        update_fields['quiz_score'] = progress_data.quiz_score
+    
+    if progress_data.time_spent is not None:
+        update_fields['time_spent'] = progress_data.time_spent
+    
+    await progress_collection.update_one(
+        {"user_id": current_user['sub'], "lesson_id": progress_data.lesson_id},
         {
-            "$set": {
-                "teacher_id": current_user.id,
-                "essay_marks": essay_marks,
-                "short_answer_marks": short_answer_marks,
-                "total_marks": total,
-                "teacher_comments": marks_data.get("comments", ""),
-                "marked_at": datetime.now(timezone.utc)
+            "$set": update_fields,
+            "$setOnInsert": {
+                "id": str(__import__('uuid').uuid4()),
+                "user_id": current_user['sub'],
+                "lesson_id": progress_data.lesson_id
             }
-        }
-    )
-    
-    return {"message": "Paper 2 marked successfully", "total_marks": total}
-
-# ============================================================================
-# RESULTS & PROGRESS
-# ============================================================================
-
-@app.get("/api/students/{student_id}/progress")
-async def get_student_progress(student_id: str, current_user: User = Depends(get_current_user)):
-    """Get student progress across all monthly exams (blood report style)"""
-    
-    # Get all attempts for student
-    attempts = await db.attempts.find(
-        {"student_id": student_id, "is_completed": True},
-        {"_id": 0}
-    ).sort("submitted_at", 1).to_list(100)
-    
-    # Get Paper 2 submissions
-    paper2_subs = await db.paper2_submissions.find(
-        {"student_id": student_id, "marked_at": {"$exists": True}},
-        {"_id": 0}
-    ).to_list(100)
-    
-    # Build monthly progress
-    monthly_progress = []
-    skill_trends = {skill.value: [] for skill in SkillArea}
-    
-    # Batch fetch all exams to avoid N+1 query
-    exam_ids = [attempt["exam_id"] for attempt in attempts]
-    exams_list = await db.exams.find(
-        {"id": {"$in": exam_ids}}, 
-        {"_id": 0, "id": 1, "month": 1, "title": 1}
-    ).to_list(100)
-    exams_map = {exam["id"]: exam for exam in exams_list}
-    
-    for attempt in attempts:
-        exam = exams_map.get(attempt["exam_id"])
-        if not exam:
-            continue  # Skip if exam not found
-        
-        # Find corresponding Paper 2
-        paper2 = next((p for p in paper2_subs if p["exam_id"] == attempt["exam_id"]), None)
-        paper2_score = paper2["total_marks"] if paper2 else 0
-        
-        month_data = {
-            "month": exam["month"],
-            "exam_title": exam["title"],
-            "paper1_score": attempt["score_paper1"],
-            "paper2_score": paper2_score,
-            "total_score": attempt["score_paper1"] + paper2_score,
-            "total_possible": 100,  # 60 + 40
-            "skill_percentages": attempt.get("skill_percentages", {}),
-            "submitted_at": attempt["submitted_at"]
-        }
-        
-        monthly_progress.append(month_data)
-        
-        # Add to trends
-        for skill, percentage in attempt.get("skill_percentages", {}).items():
-            skill_trends[skill].append({
-                "month": exam["month"],
-                "percentage": percentage
-            })
-    
-    # Calculate strengths & weaknesses (latest month)
-    if attempts:
-        latest_skills = attempts[-1].get("skill_percentages", {})
-        sorted_skills = sorted(latest_skills.items(), key=lambda x: x[1], reverse=True)
-        
-        strengths = sorted_skills[:3]  # Top 3
-        weaknesses = sorted_skills[-3:]  # Bottom 3
-    else:
-        strengths = []
-        weaknesses = []
-    
-    return {
-        "student_id": student_id,
-        "monthly_progress": monthly_progress,
-        "skill_trends": skill_trends,
-        "strengths": strengths,
-        "weaknesses": weaknesses,
-        "total_exams_taken": len(attempts)
-    }
-
-# ============================================================================
-# PDF EXAM ENDPOINTS (NEW)
-# ============================================================================
-
-@app.post("/api/exams/create-pdf")
-async def create_pdf_exam(
-    exam_data: ExamCreatePDF,
-    current_user: User = Depends(get_current_user)
-):
-    """Create a new PDF-based exam (Typesetter only)"""
-    if current_user.role not in [UserRole.TYPESETTER, UserRole.ADMIN]:
-        raise HTTPException(status_code=403, detail="Only typesetters and admins can create PDF exams")
-    
-    exam_id = str(uuid.uuid4())
-    exam_doc = {
-        "id": exam_id,
-        "title": exam_data.title,
-        "grade": exam_data.grade.value,
-        "month": exam_data.month,
-        "exam_format": "pdf",
-        "pdf_path_en": None,
-        "pdf_path_si": None,
-        "pdf_path_ta": None,
-        "duration_minutes": exam_data.duration_minutes,
-        "total_marks_paper1": exam_data.total_marks_paper1,
-        "total_marks_paper2": 0,
-        "status": "draft",
-        "created_by": current_user.id,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "is_active": True
-    }
-    
-    await db.exams.insert_one(exam_doc)
-    invalidate_exam_cache()
-    
-    return {
-        "message": "PDF exam created successfully",
-        "exam_id": exam_id,
-        "title": exam_data.title
-    }
-
-@app.post("/api/exams/{exam_id}/upload-pdf/{language}")
-async def upload_exam_pdf(
-    exam_id: str,
-    language: Language,
-    file: UploadFile = File(...),
-    current_user: User = Depends(get_current_user)
-):
-    """Upload PDF for a specific language version of an exam"""
-    if current_user.role not in [UserRole.TYPESETTER, UserRole.ADMIN]:
-        raise HTTPException(status_code=403, detail="Only typesetters and admins can upload PDFs")
-    
-    # Check if exam exists
-    exam = await db.exams.find_one({"id": exam_id})
-    if not exam:
-        raise HTTPException(status_code=404, detail="Exam not found")
-    
-    # Validate file type
-    if not file.filename.endswith('.pdf'):
-        raise HTTPException(status_code=400, detail="Only PDF files are allowed")
-    
-    # Create upload directory if doesn't exist
-    upload_dir = os.environ.get('UPLOAD_DIR', os.path.join(os.path.dirname(__file__), 'uploads', 'exam_pdfs'))
-    os.makedirs(upload_dir, exist_ok=True)
-    
-    # Generate unique filename
-    file_extension = file.filename.split('.')[-1]
-    unique_filename = f"{exam_id}_{language.value}_{uuid.uuid4().hex[:8]}.{file_extension}"
-    file_path = os.path.join(upload_dir, unique_filename)
-    
-    # Save file
-    try:
-        with open(file_path, "wb") as buffer:
-            content = await file.read()
-            buffer.write(content)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
-    
-    # Update exam document with PDF path
-    pdf_field = f"pdf_path_{language.value}"
-    await db.exams.update_one(
-        {"id": exam_id},
-        {"$set": {pdf_field: file_path}}
-    )
-    invalidate_exam_cache()
-    
-    return PDFUploadResponse(
-        message=f"PDF uploaded successfully for {language.value}",
-        exam_id=exam_id,
-        language=language,
-        pdf_path=file_path
-    )
-
-@app.get("/api/exams/{exam_id}/pdf/{language}")
-async def get_exam_pdf(
-    exam_id: str,
-    language: Language,
-    current_user: User = Depends(get_current_user)
-):
-    """Get PDF file path for a specific language"""
-    exam = await db.exams.find_one({"id": exam_id}, {"_id": 0})
-    if not exam:
-        raise HTTPException(status_code=404, detail="Exam not found")
-    
-    pdf_field = f"pdf_path_{language.value}"
-    pdf_path = exam.get(pdf_field)
-    
-    if not pdf_path or not os.path.exists(pdf_path):
-        raise HTTPException(status_code=404, detail=f"PDF not available for {language.value}")
-    
-    from fastapi.responses import FileResponse
-    return FileResponse(pdf_path, media_type="application/pdf", filename=f"exam_{exam_id}_{language.value}.pdf")
-
-@app.get("/api/")
-async def root():
-    """API root"""
-    return {
-        "message": "Examination Evaluation Bureau API",
-        "version": "1.0.0",
-        "status": "operational"
-    }
-
-# ============================================================================
-# STARTUP
-# ============================================================================
-
-@app.on_event("startup")
-async def startup_event():
-    """Create indexes and seed sample data"""
-    try:
-        await db.users.create_index("email", unique=True)
-        await db.exams.create_index([("grade", 1), ("month", 1)])
-        await db.attempts.create_index([("student_id", 1), ("exam_id", 1)])
-        await db.paper2_submissions.create_index([("student_id", 1), ("exam_id", 1)])
-        logger.info("✓ Database indexes created")
-        
-        # Seed sample users for all grades
-        sample_users = [
-            # Grade 5 users
-            {"id": "student_g5_001", "email": "student@test.com", "full_name": "Grade 5 Student", "hashed_password": get_password_hash("student123"), "role": "student", "grade": "grade_5", "created_at": datetime.now(timezone.utc), "is_active": True},
-            # Grade 4 users
-            {"id": "student_g4_001", "email": "student4@test.com", "full_name": "Grade 4 Student", "hashed_password": get_password_hash("student123"), "role": "student", "grade": "grade_4", "created_at": datetime.now(timezone.utc), "is_active": True},
-            # Grade 3 users
-            {"id": "student_g3_001", "email": "student3@test.com", "full_name": "Grade 3 Student", "hashed_password": get_password_hash("student123"), "role": "student", "grade": "grade_3", "created_at": datetime.now(timezone.utc), "is_active": True},
-            # Grade 2 users
-            {"id": "student_g2_001", "email": "student2@test.com", "full_name": "Grade 2 Student", "hashed_password": get_password_hash("student123"), "role": "student", "grade": "grade_2", "created_at": datetime.now(timezone.utc), "is_active": True},
-            # Staff users
-            {"id": "teacher_001", "email": "teacher@test.com", "full_name": "Sample Teacher", "hashed_password": get_password_hash("teacher123"), "role": "teacher", "grade": "grade_5", "created_at": datetime.now(timezone.utc), "is_active": True},
-            {"id": "parent_001", "email": "parent@test.com", "full_name": "Sample Parent", "hashed_password": get_password_hash("parent123"), "role": "parent", "grade": "grade_5", "created_at": datetime.now(timezone.utc), "is_active": True, "linked_student_id": "student_g5_001"},
-            {"id": "admin_001", "email": "admin@test.com", "full_name": "Sample Admin", "hashed_password": get_password_hash("admin123"), "role": "admin", "grade": "grade_5", "created_at": datetime.now(timezone.utc), "is_active": True}
-        ]
-        
-        for user in sample_users:
-            existing = await db.users.find_one({"email": user["email"]})
-            if not existing:
-                await db.users.insert_one(user)
-                logger.info(f"✓ Created sample user: {user['email']}")
-            else:
-                logger.info(f"Sample user already exists: {user['email']}")
-                
-        # Seed sample exams for ALL grades
-        grades_config = [
-            {"grade": "grade_2", "title_prefix": "Grade 2 Model Exam", "questions": 40, "duration": 45},
-            {"grade": "grade_3", "title_prefix": "Grade 3 Model Exam", "questions": 50, "duration": 50},
-            {"grade": "grade_4", "title_prefix": "Grade 4 Model Exam", "questions": 55, "duration": 55},
-            {"grade": "grade_5", "title_prefix": "Grade 5 Scholarship Practice Exam", "questions": 60, "duration": 60}
-        ]
-        
-        skill_areas = ["mathematical_reasoning", "language_proficiency", "general_knowledge", "comprehension_skills", "problem_solving"]
-        
-        for config in grades_config:
-            existing_exam = await db.exams.find_one({"grade": config["grade"]})
-            if not existing_exam:
-                # Create February 2025 exam
-                sample_exam = {
-                    "id": str(uuid.uuid4()),
-                    "title": f"February 2025 - {config['title_prefix']}",
-                    "grade": config["grade"],
-                    "month": "2025-02",
-                    "paper_number": 1,
-                    "duration_minutes": config["duration"],
-                    "total_questions": config["questions"],
-                    "status": "published",
-                    "paper1_questions": [
-                        {
-                            "question_number": i+1, 
-                            "question_text": f"Sample question {i+1} for {config['grade'].replace('_', ' ')}", 
-                            "question_text_si": f"ප්‍රශ්නය {i+1} - {config['grade'].replace('_', ' ')}", 
-                            "question_text_ta": f"கேள்வி {i+1} - {config['grade'].replace('_', ' ')}", 
-                            "options": ["Option A", "Option B", "Option C", "Option D"],
-                            "options_si": ["විකල්පය A", "විකල්පය B", "විකල්පය C", "විකල්පය D"],
-                            "options_ta": ["விருப்பம் A", "விருப்பம் B", "விருப்பம் C", "விருப்பம் D"],
-                            "correct_answer": ["A", "B", "C", "D"][i % 4], 
-                            "skill_area": skill_areas[i % 5]
-                        }
-                        for i in range(config["questions"])
-                    ],
-                    "is_active": True,
-                    "created_by": "admin_001",
-                    "created_at": datetime.now(timezone.utc)
-                }
-                await db.exams.insert_one(sample_exam)
-                logger.info(f"✓ Created sample exam for {config['grade']}")
-                
-                # Create January 2025 exam as well
-                sample_exam_jan = {
-                    "id": str(uuid.uuid4()),
-                    "title": f"January 2025 - {config['title_prefix']}",
-                    "grade": config["grade"],
-                    "month": "2025-01",
-                    "paper_number": 1,
-                    "duration_minutes": config["duration"],
-                    "total_questions": config["questions"],
-                    "status": "published",
-                    "paper1_questions": [
-                        {
-                            "question_number": i+1, 
-                            "question_text": f"January Q{i+1} for {config['grade'].replace('_', ' ')}", 
-                            "question_text_si": f"ජනවාරි ප්‍රශ්නය {i+1}", 
-                            "question_text_ta": f"ஜனவரி கேள்வி {i+1}", 
-                            "options": ["Option A", "Option B", "Option C", "Option D"],
-                            "options_si": ["විකල්පය A", "විකල්පය B", "විකල්පය C", "විකල්පය D"],
-                            "options_ta": ["விருப்பம் A", "விருப்பம் B", "விருப்பம் C", "விருப்பம் D"],
-                            "correct_answer": ["A", "B", "C", "D"][(i+1) % 4], 
-                            "skill_area": skill_areas[i % 5]
-                        }
-                        for i in range(config["questions"])
-                    ],
-                    "is_active": True,
-                    "created_by": "admin_001",
-                    "created_at": datetime.now(timezone.utc)
-                }
-                await db.exams.insert_one(sample_exam_jan)
-                logger.info(f"✓ Created January exam for {config['grade']}")
-                
-    except Exception as e:
-        logger.error(f"Error in startup: {e}")
-
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.environ.get('PORT', 8001))
-    uvicorn.run(app, host="0.0.0.0", port=port)
-
-
-# ============================================================================
-# EMAIL NOTIFICATIONS & EXPORTS
-# ============================================================================
-
-from email_service import EmailService
-from export_service import ExportService
-from fastapi.responses import StreamingResponse
-import io
-
-@app.post("/api/notifications/send-test-email")
-async def send_test_email(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    """Send a test email to verify email configuration (Admin only)"""
-    user = await get_current_user(credentials)
-    if user["role"] != UserRole.ADMIN:
-        raise HTTPException(status_code=403, detail="Admin access required")
-    
-    test_email = os.getenv("SMTP_EMAIL", "exams@tecsrilanka.com.lk")
-    success = EmailService.send_exam_published_notification(
-        parent_email=test_email,
-        student_name="Test Student",
-        exam_title="Test Exam",
-        exam_date=datetime.now().strftime("%Y-%m-%d"),
-        grade="Grade 5",
-        language="si"
-    )
-    
-    return {
-        "success": success,
-        "message": "Test email sent successfully" if success else "Failed to send test email",
-        "sent_to": test_email
-    }
-
-@app.post("/api/notifications/exam-published/{exam_id}")
-async def notify_exam_published(
-    exam_id: str,
-    credentials: HTTPAuthorizationCredentials = Depends(security)
-):
-    """Send notifications when exam is published (Teacher/Admin only)"""
-    user = await get_current_user(credentials)
-    if user["role"] not in [UserRole.TEACHER, UserRole.ADMIN]:
-        raise HTTPException(status_code=403, detail="Teacher/Admin access required")
-    
-    # Get exam details
-    exam = await db.exams.find_one({"exam_id": exam_id})
-    if not exam:
-        raise HTTPException(status_code=404, detail="Exam not found")
-    
-    # Get all students in this grade
-    students = await db.users.find({
-        "role": UserRole.STUDENT,
-        "grade": exam["grade"]
-    }).to_list(1000)
-    
-    sent_count = 0
-    failed_count = 0
-    
-    for student in students:
-        parent_email = student.get("parent_email")
-        if parent_email:
-            success = EmailService.send_exam_published_notification(
-                parent_email=parent_email,
-                student_name=student.get("full_name", "Student"),
-                exam_title=exam["title"],
-                exam_date=exam.get("created_at", datetime.now()).strftime("%Y-%m-%d"),
-                grade=exam["grade"],
-                language=student.get("preferred_language", "si")
-            )
-            if success:
-                sent_count += 1
-            else:
-                failed_count += 1
-    
-    return {
-        "success": True,
-        "sent": sent_count,
-        "failed": failed_count,
-        "total_students": len(students)
-    }
-
-@app.get("/api/reports/export-results/{exam_id}")
-async def export_exam_results(
-    exam_id: str,
-    format: str = "excel",
-    credentials: HTTPAuthorizationCredentials = Depends(security)
-):
-    """Export exam results to Excel or PDF (Teacher/Admin only)"""
-    user = await get_current_user(credentials)
-    if user["role"] not in [UserRole.TEACHER, UserRole.ADMIN]:
-        raise HTTPException(status_code=403, detail="Teacher/Admin access required")
-    
-    # Get exam details
-    exam = await db.exams.find_one({"exam_id": exam_id})
-    if not exam:
-        raise HTTPException(status_code=404, detail="Exam not found")
-    
-    # Get all attempts for this exam
-    attempts = await db.attempts.find({
-        "exam_id": exam_id,
-        "status": "completed"
-    }).to_list(1000)
-    
-    # Prepare results data
-    results = []
-    for attempt in attempts:
-        student = await db.users.find_one({"email": attempt["student_email"]})
-        results.append({
-            "student_name": student.get("full_name", "") if student else "",
-            "email": attempt["student_email"],
-            "score": attempt.get("score", 0),
-            "percentage": round((attempt.get("score", 0) / exam["total_questions"]) * 100, 1),
-            "status": "Passed" if (attempt.get("score", 0) / exam["total_questions"]) >= 0.5 else "Needs Improvement"
-        })
-    
-    if format == "excel":
-        # Export to Excel
-        excel_data = ExportService.export_exam_results_to_excel(
-            exam_title=exam["title"],
-            grade=exam["grade"],
-            results=results,
-            skill_areas=SKILL_AREAS
-        )
-        
-        return StreamingResponse(
-            io.BytesIO(excel_data),
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": f"attachment; filename=exam_results_{exam_id}.xlsx"}
-        )
-    else:
-        raise HTTPException(status_code=400, detail="Only Excel format supported currently")
-
-@app.get("/api/reports/student-monthly/{student_email}/{month}")
-async def export_student_monthly_report(
-    student_email: str,
-    month: str,  # Format: YYYY-MM
-    credentials: HTTPAuthorizationCredentials = Depends(security)
-):
-    """Export monthly student report as PDF (Parent/Teacher/Admin)"""
-    user = await get_current_user(credentials)
-    
-    # Check permissions
-    if user["role"] == UserRole.STUDENT and user["email"] != student_email:
-        raise HTTPException(status_code=403, detail="Access denied")
-    if user["role"] == UserRole.PARENT:
-        student = await db.users.find_one({"email": student_email})
-        if not student or student.get("parent_email") != user["email"]:
-            raise HTTPException(status_code=403, detail="Access denied")
-    
-    # Get student info
-    student = await db.users.find_one({"email": student_email})
-    if not student:
-        raise HTTPException(status_code=404, detail="Student not found")
-    
-    # Get attempts for the month
-    from datetime import datetime
-    start_date = datetime.strptime(f"{month}-01", "%Y-%m-%d")
-    if start_date.month == 12:
-        end_date = datetime(start_date.year + 1, 1, 1)
-    else:
-        end_date = datetime(start_date.year, start_date.month + 1, 1)
-    
-    attempts = await db.attempts.find({
-        "student_email": student_email,
-        "status": "completed",
-        "submitted_at": {
-            "$gte": start_date,
-            "$lt": end_date
-        }
-    }).to_list(100)
-    
-    # Calculate statistics
-    exams_data = []
-    total_score = 0
-    for attempt in attempts:
-        exam = await db.exams.find_one({"exam_id": attempt["exam_id"]})
-        if exam:
-            percentage = round((attempt.get("score", 0) / exam["total_questions"]) * 100, 1)
-            total_score += percentage
-            exams_data.append({
-                "title": exam["title"],
-                "date": attempt["submitted_at"].strftime("%Y-%m-%d"),
-                "score": attempt.get("score", 0),
-                "total": exam["total_questions"],
-                "percentage": percentage
-            })
-    
-    avg_score = round(total_score / len(exams_data), 1) if exams_data else 0
-    
-    # Get skill breakdown
-    skill_breakdown = {}
-    for skill in SKILL_AREAS:
-        skill_scores = [a.get("skill_scores", {}).get(skill, 0) for a in attempts if "skill_scores" in a]
-        skill_breakdown[skill] = round(sum(skill_scores) / len(skill_scores), 1) if skill_scores else 0
-    
-    overall_stats = {
-        "exams_taken": len(exams_data),
-        "average_score": avg_score,
-        "highest_score": max([e["percentage"] for e in exams_data]) if exams_data else 0,
-        "lowest_score": min([e["percentage"] for e in exams_data]) if exams_data else 0
-    }
-    
-    # Generate PDF
-    pdf_data = ExportService.export_student_report_to_pdf(
-        student_name=student.get("full_name", "Student"),
-        grade=student.get("grade", ""),
-        month=month,
-        exams_data=exams_data,
-        skill_breakdown=skill_breakdown,
-        overall_stats=overall_stats
-    )
-    
-    return StreamingResponse(
-        io.BytesIO(pdf_data),
-        media_type="application/pdf",
-        headers={"Content-Disposition": f"attachment; filename=report_{student_email}_{month}.pdf"}
-    )
-
-@app.post("/api/settings/branding")
-async def update_branding(
-    branding: Dict,
-    credentials: HTTPAuthorizationCredentials = Depends(security)
-):
-    """Update platform branding (Admin only)"""
-    user = await get_current_user(credentials)
-    if user["role"] != UserRole.ADMIN:
-        raise HTTPException(status_code=403, detail="Admin access required")
-    
-    # Update or create branding document
-    await db.branding.update_one(
-        {"_id": "main"},
-        {"$set": {
-            "institution_name": branding.get("institution_name", "Education Reforms Bureau"),
-            "portal_name": branding.get("portal_name", "Grade 5 Scholarship Exam Portal"),
-            "tagline": branding.get("tagline", "Building Future Scholars"),
-            "primary_color": branding.get("primary_color", "#F97316"),
-            "secondary_color": branding.get("secondary_color", "#3B82F6"),
-            "updated_at": datetime.now(timezone.utc)
-        }},
+        },
         upsert=True
     )
     
-    return {"success": True, "message": "Branding updated successfully"}
+    return {"message": "Progress updated successfully"}
 
-@app.get("/api/settings/branding")
-async def get_branding():
-    """Get platform branding (Public)"""
-    branding = await db.branding.find_one({"_id": "main"})
-    if not branding:
-        return {
-            "institution_name": "Education Reforms Bureau",
-            "portal_name": "Grade 5 Scholarship Exam Portal",
-            "tagline": "Building Future Scholars",
-            "primary_color": "#F97316",
-            "secondary_color": "#3B82F6"
+# Inquiries endpoints
+@api_router.post("/inquiries")
+async def create_inquiry(inquiry_data: InquiryCreate):
+    inquiry = Inquiry(**inquiry_data.model_dump())
+    inquiry_dict = inquiry.model_dump()
+    inquiry_dict['created_at'] = inquiry_dict['created_at'].isoformat()
+    
+    await inquiries_collection.insert_one(inquiry_dict)
+    return {"message": "Inquiry submitted successfully", "id": inquiry.id}
+
+@api_router.get("/admin/inquiries", dependencies=[Depends(require_admin)])
+async def get_inquiries(
+    status: Optional[str] = Query(None),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, le=200)
+):
+    filters = {}
+    if status:
+        filters['status'] = status
+    
+    inquiries = await inquiries_collection.find(
+        filters,
+        {"_id": 0}
+    ).skip(skip).limit(limit).to_list(length=limit)
+    
+    return {"inquiries": serialize_doc(inquiries), "count": len(inquiries)}
+
+@api_router.put("/admin/inquiries/{inquiry_id}", dependencies=[Depends(require_admin)])
+async def update_inquiry(inquiry_id: str, status: str, notes: Optional[str] = None):
+    update_fields = {"status": status}
+    if notes:
+        update_fields['notes'] = notes
+    
+    result = await inquiries_collection.update_one(
+        {"id": inquiry_id},
+        {"$set": update_fields}
+    )
+    
+    if result.modified_count == 0:
+        raise HTTPException(status_code=404, detail="Inquiry not found")
+    
+    return {"message": "Inquiry updated successfully"}
+
+# Statistics endpoint
+@api_router.get("/stats")
+async def get_stats(current_user: dict = Depends(get_current_user)):
+    total_lessons = await lessons_collection.count_documents({})
+    
+    user_progress = await progress_collection.find(
+        {"user_id": current_user['sub']}
+    ).to_list(length=1000)
+    
+    completed = sum(1 for p in user_progress if p.get('status') == 'completed')
+    in_progress = sum(1 for p in user_progress if p.get('status') == 'in_progress')
+    
+    avg_score = 0
+    scores = [p.get('quiz_score') for p in user_progress if p.get('quiz_score') is not None]
+    if scores:
+        avg_score = sum(scores) / len(scores)
+    
+    return {
+        "total_lessons": total_lessons,
+        "completed_lessons": completed,
+        "in_progress_lessons": in_progress,
+        "average_quiz_score": round(avg_score, 1)
+    }
+
+# Certificates endpoint
+@api_router.post("/certificates/generate")
+async def generate_certificate(
+    curriculum: str,
+    subject: str,
+    grade: int,
+    current_user: dict = Depends(get_current_user)
+):
+    from reportlab.lib.pagesizes import letter, A4
+    from reportlab.lib.units import inch
+    from reportlab.pdfgen import canvas
+    from reportlab.lib import colors
+    import io
+    from fastapi.responses import StreamingResponse
+    
+    # Create PDF in memory
+    buffer = io.BytesIO()
+    c = canvas.Canvas(buffer, pagesize=letter)
+    width, height = letter
+    
+    # Certificate design
+    # Border
+    c.setStrokeColor(colors.HexColor('#0891B2'))
+    c.setLineWidth(3)
+    c.rect(0.5*inch, 0.5*inch, width-1*inch, height-1*inch)
+    
+    # Title
+    c.setFont("Helvetica-Bold", 32)
+    c.setFillColor(colors.HexColor('#0891B2'))
+    c.drawCentredString(width/2, height-2*inch, "Certificate of Completion")
+    
+    # Body text
+    c.setFont("Helvetica", 16)
+    c.setFillColor(colors.black)
+    c.drawCentredString(width/2, height-3*inch, "This is to certify that")
+    
+    # Student name
+    user_doc = await users_collection.find_one({"id": current_user['sub']})
+    c.setFont("Helvetica-Bold", 24)
+    c.setFillColor(colors.HexColor('#0891B2'))
+    c.drawCentredString(width/2, height-3.7*inch, user_doc.get('name', 'Student'))
+    
+    # Completion text
+    c.setFont("Helvetica", 16)
+    c.setFillColor(colors.black)
+    c.drawCentredString(width/2, height-4.5*inch, "has successfully completed")
+    
+    # Course details
+    c.setFont("Helvetica-Bold", 20)
+    c.setFillColor(colors.HexColor('#0891B2'))
+    course_text = f"{subject.title()} - Grade {grade}"
+    c.drawCentredString(width/2, height-5.3*inch, course_text)
+    
+    c.setFont("Helvetica", 14)
+    c.setFillColor(colors.black)
+    c.drawCentredString(width/2, height-5.8*inch, f"Curriculum: {curriculum.upper()}")
+    
+    # Date
+    from datetime import datetime
+    c.setFont("Helvetica", 12)
+    c.drawCentredString(width/2, height-7*inch, f"Date: {datetime.now().strftime('%B %d, %Y')}")
+    
+    # Footer
+    c.setFont("Helvetica-Oblique", 10)
+    c.setFillColor(colors.gray)
+    c.drawCentredString(width/2, 1.2*inch, "Global STEAM Education Hub")
+    c.drawCentredString(width/2, 1*inch, "TEC Sri Lanka Worldwide")
+    
+    c.save()
+    buffer.seek(0)
+    
+    # Save to database
+    cert = {
+        "id": str(__import__('uuid').uuid4()),
+        "user_id": current_user['sub'],
+        "curriculum": curriculum,
+        "subject": subject,
+        "grade": grade,
+        "completion_date": datetime.now(timezone.utc).isoformat()
+    }
+    await certificates_collection.insert_one(cert)
+    
+    return StreamingResponse(
+        buffer,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename=certificate_{subject}_{grade}.pdf"}
+    )
+
+
+# Download Lesson as PDF endpoint
+@api_router.get("/lessons/{lesson_id}/download")
+async def download_lesson_pdf(lesson_id: str):
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.units import inch
+    from reportlab.pdfgen import canvas
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, PageBreak
+    from reportlab.lib.enums import TA_LEFT, TA_CENTER
+    import io
+    from fastapi.responses import StreamingResponse
+    
+    # Get lesson
+    lesson = await lessons_collection.find_one({"id": lesson_id}, {"_id": 0})
+    if not lesson:
+        raise HTTPException(status_code=404, detail="Lesson not found")
+    
+    lesson = serialize_doc(lesson)
+    
+    # Create PDF in memory
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter,
+                           rightMargin=72, leftMargin=72,
+                           topMargin=72, bottomMargin=18)
+    
+    # Container for the 'Flowable' objects
+    elements = []
+    
+    # Define styles
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        'CustomTitle',
+        parent=styles['Heading1'],
+        fontSize=24,
+        textColor=colors.HexColor('#0891B2'),
+        spaceAfter=30,
+        alignment=TA_CENTER
+    )
+    
+    heading_style = ParagraphStyle(
+        'CustomHeading',
+        parent=styles['Heading2'],
+        fontSize=16,
+        textColor=colors.HexColor('#0891B2'),
+        spaceAfter=12,
+        spaceBefore=12
+    )
+    
+    body_style = ParagraphStyle(
+        'CustomBody',
+        parent=styles['BodyText'],
+        fontSize=12,
+        leading=18,
+        spaceAfter=12
+    )
+    
+    # Add title
+    title_text = lesson.get('title', {}).get('en', 'Lesson')
+    title = Paragraph(title_text, title_style)
+    elements.append(title)
+    elements.append(Spacer(1, 12))
+    
+    # Add metadata
+    metadata = [
+        f"<b>Curriculum:</b> {lesson.get('curriculum', 'N/A').upper()}",
+        f"<b>Grade:</b> {lesson.get('grade', 'N/A')}",
+        f"<b>Subject:</b> {lesson.get('subject', 'N/A').title()}",
+        f"<b>Difficulty:</b> {lesson.get('difficulty', 'N/A').title()}",
+        f"<b>Duration:</b> {lesson.get('estimated_duration', 'N/A')} minutes"
+    ]
+    
+    for meta in metadata:
+        elements.append(Paragraph(meta, body_style))
+    
+    elements.append(Spacer(1, 20))
+    
+    # Add description
+    desc_heading = Paragraph("Description", heading_style)
+    elements.append(desc_heading)
+    desc_text = lesson.get('description', {}).get('en', 'No description available')
+    desc = Paragraph(desc_text, body_style)
+    elements.append(desc)
+    elements.append(Spacer(1, 20))
+    
+    # Add content
+    content_heading = Paragraph("Lesson Content", heading_style)
+    elements.append(content_heading)
+    content_text = lesson.get('content', {}).get('en', 'No content available')
+    content = Paragraph(content_text, body_style)
+    elements.append(content)
+    elements.append(Spacer(1, 20))
+    
+    # Add attribution
+    attribution_heading = Paragraph("Attribution & Licensing", heading_style)
+    elements.append(attribution_heading)
+    
+    attribution_text = f"""
+    <b>Source:</b> {lesson.get('source', 'N/A')} ({lesson.get('license', 'N/A')})<br/>
+    <b>URL:</b> {lesson.get('source_url', 'N/A')}<br/>
+    <br/>
+    <i>Downloaded from Global STEAM Education Hub<br/>
+    TEC Sri Lanka Worldwide © 2024</i>
+    """
+    attribution = Paragraph(attribution_text, body_style)
+    elements.append(attribution)
+    
+    # Build PDF
+    doc.build(elements)
+    buffer.seek(0)
+    
+    # Create safe filename
+    safe_title = lesson.get('title', {}).get('en', 'lesson').replace(' ', '_').replace('/', '_')[:50]
+    filename = f"lesson_{safe_title}.pdf"
+    
+    return StreamingResponse(
+        buffer,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+# ==========================================
+# STRIPE PAYMENT INTEGRATION
+# ==========================================
+from emergentintegrations.payments.stripe.checkout import (
+    StripeCheckout, CheckoutSessionResponse, CheckoutStatusResponse, CheckoutSessionRequest
+)
+
+# Fixed subscription packages (NEVER accept amount from frontend)
+SUBSCRIPTION_PACKAGES = {
+    "standard": {"amount": 5.00, "currency": "usd", "name": "Standard Plan", "lkr_price": 1500},
+    "premium": {"amount": 10.00, "currency": "usd", "name": "Premium Plan", "lkr_price": 3000},
+}
+
+payment_transactions_collection = db.payment_transactions
+
+class SubscribeRequest(PydanticBaseModel):
+    package_id: str
+    origin_url: str
+
+@api_router.get("/stripe/publishable-key")
+async def get_stripe_publishable_key():
+    """Return the publishable key for the frontend"""
+    key = os.getenv('STRIPE_PUBLISHABLE_KEY', '')
+    return {"publishable_key": key}
+
+@api_router.post("/stripe/create-checkout")
+async def create_checkout_session(req: SubscribeRequest, http_request: Request = None):
+    """Create a Stripe checkout session for subscription"""
+    # Validate package
+    if req.package_id not in SUBSCRIPTION_PACKAGES:
+        raise HTTPException(status_code=400, detail=f"Invalid package: {req.package_id}")
+    
+    package = SUBSCRIPTION_PACKAGES[req.package_id]
+    
+    # Get Stripe API key
+    stripe_api_key = os.getenv('STRIPE_API_KEY')
+    if not stripe_api_key:
+        raise HTTPException(status_code=500, detail="Stripe not configured")
+    
+    # Build URLs from frontend origin (NEVER hardcode)
+    success_url = f"{req.origin_url}/payment-success?session_id={{CHECKOUT_SESSION_ID}}"
+    cancel_url = f"{req.origin_url}/pricing"
+    
+    # Setup webhook
+    host_url = str(http_request.base_url).rstrip('/') if http_request else req.origin_url
+    webhook_url = f"{host_url}/api/webhook/stripe"
+    
+    stripe_checkout = StripeCheckout(api_key=stripe_api_key, webhook_url=webhook_url)
+    
+    # Create checkout session
+    checkout_request = CheckoutSessionRequest(
+        amount=package["amount"],
+        currency=package["currency"],
+        success_url=success_url,
+        cancel_url=cancel_url,
+        metadata={
+            "package_id": req.package_id,
+            "package_name": package["name"],
         }
-    return branding
+    )
+    
+    try:
+        session: CheckoutSessionResponse = await stripe_checkout.create_checkout_session(checkout_request)
+        
+        # Create payment transaction record
+        import uuid as uuid_mod
+        transaction = {
+            "id": str(uuid_mod.uuid4()),
+            "session_id": session.session_id,
+            "package_id": req.package_id,
+            "package_name": package["name"],
+            "amount": package["amount"],
+            "currency": package["currency"],
+            "payment_status": "initiated",
+            "status": "pending",
+            "metadata": {"package_id": req.package_id},
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        await payment_transactions_collection.insert_one(transaction)
+        
+        return {"url": session.url, "session_id": session.session_id}
+    except Exception as e:
+        logger.error(f"Stripe checkout error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Payment error: {str(e)}")
+
+@api_router.get("/stripe/checkout-status/{session_id}")
+async def get_checkout_status(session_id: str):
+    """Check status of a checkout session"""
+    stripe_api_key = os.getenv('STRIPE_API_KEY')
+    if not stripe_api_key:
+        raise HTTPException(status_code=500, detail="Stripe not configured")
+    
+    stripe_checkout = StripeCheckout(api_key=stripe_api_key, webhook_url="")
+    
+    try:
+        status: CheckoutStatusResponse = await stripe_checkout.get_checkout_status(session_id)
+        
+        # Update transaction in database (only once)
+        existing = await payment_transactions_collection.find_one({"session_id": session_id})
+        if existing and existing.get("payment_status") != "paid":
+            await payment_transactions_collection.update_one(
+                {"session_id": session_id},
+                {"$set": {
+                    "payment_status": status.payment_status,
+                    "status": status.status,
+                    "amount_total": status.amount_total,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }}
+            )
+        
+        return {
+            "status": status.status,
+            "payment_status": status.payment_status,
+            "amount_total": status.amount_total,
+            "currency": status.currency,
+        }
+    except Exception as e:
+        logger.error(f"Checkout status error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Include the router in the main app
+app.include_router(api_router)
+
+@app.post("/api/webhook/stripe")
+async def stripe_webhook(request: Request):
+    """Handle Stripe webhooks"""
+    stripe_api_key = os.getenv('STRIPE_API_KEY')
+    if not stripe_api_key:
+        raise HTTPException(status_code=500, detail="Stripe not configured")
+    
+    host_url = str(request.base_url).rstrip('/')
+    webhook_url = f"{host_url}api/webhook/stripe"
+    stripe_checkout = StripeCheckout(api_key=stripe_api_key, webhook_url=webhook_url)
+    
+    try:
+        body = await request.body()
+        signature = request.headers.get("Stripe-Signature", "")
+        webhook_response = await stripe_checkout.handle_webhook(body, signature)
+        
+        # Update transaction
+        if webhook_response and webhook_response.session_id:
+            await payment_transactions_collection.update_one(
+                {"session_id": webhook_response.session_id},
+                {"$set": {
+                    "payment_status": webhook_response.payment_status,
+                    "event_type": webhook_response.event_type,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }}
+            )
+        
+        return {"status": "ok"}
+    except Exception as e:
+        logger.error(f"Webhook error: {str(e)}")
+        return {"status": "error", "detail": str(e)}
+
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_credentials=True,
+    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+
+# Google Cloud Text-to-Speech endpoint
+from pydantic import BaseModel
+
+class TTSRequest(BaseModel):
+    text: str
+    language: str = "en-US"
+
+@app.post("/api/tts")
+async def text_to_speech(request: TTSRequest):
+    """
+    Convert text to speech using Azure TTS (for Sinhala) or Google Cloud TTS (for others)
+    Returns base64 encoded audio
+    """
+    import requests
+    
+    try:
+        # DEBUG: Log exactly what we receive
+        logger.info(f"🔊 TTS REQUEST: language={request.language}, text={request.text[:30]}...")
+        
+        # Use Azure for Sinhala, Google Cloud for others
+        if request.language == 'si-LK':
+            logger.info("→ Routing to AZURE for Sinhala")
+            return await azure_tts(request.text, request.language)
+        else:
+            logger.info(f"→ Routing to GOOGLE for {request.language}")
+            return await google_tts(request.text, request.language)
+            
+    except Exception as e:
+        logger.error(f"TTS error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+async def azure_tts(text: str, language: str):
+    """Azure Speech Service TTS for Sinhala"""
+    import requests
+    
+    api_key = os.getenv('AZURE_SPEECH_KEY')
+    region = os.getenv('AZURE_SPEECH_REGION')
+    
+    if not api_key or not region:
+        raise HTTPException(status_code=500, detail="Azure TTS not configured")
+    
+    logger.info(f"Azure TTS: language={language}, text={text[:50]}...")
+    
+    # Voice mapping
+    voice_map = {
+        'si-LK': 'si-LK-ThiliniNeural',  # Sinhala female voice
+    }
+    
+    voice_name = voice_map.get(language, 'en-US-JennyNeural')
+    
+    url = f"https://{region}.tts.speech.microsoft.com/cognitiveservices/v1"
+    
+    headers = {
+        'Ocp-Apim-Subscription-Key': api_key,
+        'Content-Type': 'application/ssml+xml',
+        'X-Microsoft-OutputFormat': 'audio-16khz-128kbitrate-mono-mp3'
+    }
+    
+    ssml = f"""<speak version='1.0' xml:lang='si-LK'>
+        <voice xml:lang='si-LK' name='{voice_name}'>
+            {text}
+        </voice>
+    </speak>"""
+    
+    response = requests.post(url, headers=headers, data=ssml.encode('utf-8'))
+    
+    if response.status_code == 200:
+        import base64
+        audio_base64 = base64.b64encode(response.content).decode('utf-8')
+        logger.info("✅ Azure TTS audio generated successfully")
+        return {"audio": audio_base64, "success": True}
+    else:
+        logger.error(f"Azure TTS error: {response.text}")
+        raise HTTPException(status_code=response.status_code, detail=response.text)
+
+async def google_tts(text: str, language: str):
+    """Google Cloud TTS for Tamil, Hindi, etc."""
+    import requests
+    
+    api_key = os.getenv('GOOGLE_CLOUD_TTS_API_KEY')
+    if not api_key:
+        raise HTTPException(status_code=500, detail="Google TTS API key not configured")
+    
+    logger.info(f"Google TTS: language={language}, text={text[:50]}...")
+    
+    # Map language codes to Google Cloud TTS voice names
+    voice_map = {
+        'ta-IN': {'languageCode': 'ta-IN', 'name': 'ta-IN-Standard-A'},
+        'hi-IN': {'languageCode': 'hi-IN', 'name': 'hi-IN-Standard-A'},
+        'ar-SA': {'languageCode': 'ar-XA', 'name': 'ar-XA-Standard-A'},
+        'bn-IN': {'languageCode': 'bn-IN', 'name': 'bn-IN-Standard-A'},
+        'en-US': {'languageCode': 'en-US', 'name': 'en-US-Standard-A'},
+    }
+    
+    voice_config = voice_map.get(language, {'languageCode': 'en-US', 'name': 'en-US-Standard-A'})
+    
+    logger.info(f"Using Google voice: {voice_config}")
+    
+    url = f"https://texttospeech.googleapis.com/v1/text:synthesize?key={api_key}"
+    
+    payload = {
+        "input": {"text": text},
+        "voice": {
+            "languageCode": voice_config['languageCode'],
+            "name": voice_config['name']
+        },
+        "audioConfig": {
+            "audioEncoding": "MP3",
+            "pitch": 0,
+            "speakingRate": 0.9
+        }
+    }
+    
+    response = requests.post(url, json=payload)
+    
+    if response.status_code == 200:
+        audio_content = response.json().get('audioContent')
+        logger.info("✅ Google TTS audio generated successfully")
+        return {"audio": audio_content, "success": True}
+    else:
+        logger.error(f"Google TTS error: {response.text}")
+        raise HTTPException(status_code=response.status_code, detail=response.text)
+
+@app.on_event("shutdown")
+async def shutdown_db_client():
+    from database import client
+    client.close()
+
+# ==========================================
+# TEXT-TO-SPEECH (Google Translate TTS Proxy)
+# ==========================================
+import httpx
+
+@api_router.post("/tts")
+async def text_to_speech(request: Request):
+    """Proxy Google Translate TTS for Sinhala/Tamil/etc voice reading"""
+    import base64
+    body = await request.json()
+    text = body.get("text", "")
+    lang = body.get("language", "en")
+    
+    # Map frontend codes to Google TTS codes
+    lang_map = {
+        "si-LK": "si", "ta-IN": "ta", "hi-IN": "hi", "zh-CN": "zh-CN",
+        "zh-HK": "zh-TW", "th-TH": "th", "vi-VN": "vi", "id-ID": "id",
+        "bn-IN": "bn", "ur-PK": "ur", "ar-SA": "ar", "en-US": "en",
+        "ja-JP": "ja", "ko-KR": "ko", "ru-RU": "ru",
+    }
+    tts_lang = lang_map.get(lang, lang.split("-")[0])
+    
+    if not text or len(text.strip()) < 2:
+        return {"success": False, "error": "No text provided"}
+    
+    # Split into chunks (Google TTS limit ~200 chars)
+    chunks = []
+    sentences = text.replace("\n", ". ").split(". ")
+    current = ""
+    for s in sentences:
+        if len(current + s) > 180:
+            if current.strip():
+                chunks.append(current.strip())
+            current = s
+        else:
+            current = current + ". " + s if current else s
+    if current.strip():
+        chunks.append(current.strip())
+    
+    # Fetch audio for each chunk
+    audio_parts = []
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        for chunk in chunks[:20]:  # Max 20 chunks
+            try:
+                encoded = httpx.QueryParams({"ie": "UTF-8", "q": chunk, "tl": tts_lang, "client": "tw-ob"})
+                url = f"https://translate.google.com/translate_tts?{encoded}"
+                resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+                if resp.status_code == 200:
+                    audio_parts.append(resp.content)
+            except Exception as e:
+                logger.warning(f"TTS chunk error: {e}")
+    
+    if audio_parts:
+        combined = b"".join(audio_parts)
+        audio_b64 = base64.b64encode(combined).decode()
+        return {"success": True, "audio": audio_b64, "language": tts_lang}
+    
+    return {"success": False, "error": "TTS generation failed"}
+
+# ============= CERTIFICATE SYSTEM =============
+
+@api_router.get("/certificates/progress")
+async def get_certificate_progress(current_user: dict = Depends(get_current_user)):
+    """Get user's certificate progress by age group"""
+    user_id = current_user['sub']
+    
+    age_groups = ['5-7', '8-9', '10-12', '13-15', '16-18']
+    progress = []
+    
+    for age_group in age_groups:
+        total_lessons = await lessons_collection.count_documents({
+            'is_ai_curriculum': True,
+            'age_group': age_group
+        })
+        
+        completed = await progress_collection.count_documents({
+            'user_id': user_id,
+            'age_group': age_group,
+            'completed': True
+        })
+        
+        cert = await certificates_collection.find_one({
+            'user_id': user_id,
+            'age_group': age_group
+        })
+        
+        progress.append({
+            'age_group': age_group,
+            'total_lessons': total_lessons,
+            'completed_lessons': completed,
+            'progress_percentage': (completed / total_lessons * 100) if total_lessons > 0 else 0,
+            'certificate_number': cert['certificate_number'] if cert else None,
+            'certificate_status': cert['status'] if cert else 'not_requested',
+            'unlocked': completed >= (total_lessons * 0.8)
+        })
+    
+    return {'progress': progress}
+
+
+@api_router.post("/certificates/request")
+async def request_certificate(age_group: str, current_user: dict = Depends(get_current_user)):
+    """Request a certificate for completed age group"""
+    user_id = current_user['sub']
+    
+    total_lessons = await lessons_collection.count_documents({
+        'is_ai_curriculum': True,
+        'age_group': age_group
+    })
+    
+    completed = await progress_collection.count_documents({
+        'user_id': user_id,
+        'age_group': age_group,
+        'completed': True
+    })
+    
+    if completed < (total_lessons * 0.8):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Complete at least 80% of lessons ({completed}/{total_lessons})"
+        )
+    
+    existing = await certificates_collection.find_one({
+        'user_id': user_id,
+        'age_group': age_group
+    })
+    
+    if existing:
+        return {'message': 'Certificate exists', 'certificate_number': existing['certificate_number']}
+    
+    count = await certificates_collection.count_documents({})
+    cert_number = f"CERT-{datetime.now().year}-{str(count + 1).zfill(6)}"
+    
+    user_doc = await users_collection.find_one({'id': user_id})
+    
+    certificate = {
+        'id': str(uuid.uuid4()),
+        'certificate_number': cert_number,
+        'user_id': user_id,
+        'student_name': user_doc.get('name', 'Student'),
+        'age_group': age_group,
+        'program': 'AI & STEAM Education',
+        'total_lessons': total_lessons,
+        'completed_lessons': completed,
+        'status': 'approved',
+        'requested_date': datetime.now(timezone.utc).isoformat(),
+        'approved_date': datetime.now(timezone.utc).isoformat()
+    }
+    
+    await certificates_collection.insert_one(certificate)
+    
+    return {'message': 'Certificate approved!', 'certificate_number': cert_number}
+
+
+@api_router.get("/certificates/{cert_number}")
+async def get_certificate(cert_number: str):
+    """Get certificate details"""
+    import qrcode
+    import io
+    import base64
+    
+    cert = await certificates_collection.find_one(
+        {'certificate_number': cert_number},
+        {'_id': 0}
+    )
+    
+    if not cert:
+        raise HTTPException(status_code=404, detail="Certificate not found")
+    
+    qr = qrcode.QRCode(version=1, box_size=10, border=4)
+    verify_url = f"https://cert-verify-global.preview.emergentagent.com/verify/{cert_number}"
+    qr.add_data(verify_url)
+    qr.make(fit=True)
+    
+    qr_img = qr.make_image(fill_color="black", back_color="white")
+    buffer = io.BytesIO()
+    qr_img.save(buffer, format='PNG')
+    qr_base64 = base64.b64encode(buffer.getvalue()).decode()
+    
+    cert['qr_code'] = f"data:image/png;base64,{qr_base64}"
+    cert['verification_url'] = verify_url
+    
+    return cert
+
+
+@api_router.get("/verify/{cert_number}")
+async def verify_certificate(cert_number: str):
+    """Public certificate verification"""
+    cert = await certificates_collection.find_one(
+        {'certificate_number': cert_number},
+        {'_id': 0, 'id': 0, 'user_id': 0}
+    )
+    
+    if not cert:
+        return {'valid': False, 'message': 'Certificate not found'}
+    
+    if cert['status'] != 'approved':
+        return {'valid': False, 'message': 'Certificate not approved'}
+    
+    return {'valid': True, 'message': 'Certificate is valid', 'certificate': cert}
+
 

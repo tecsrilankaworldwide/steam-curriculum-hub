@@ -1,146 +1,160 @@
-# Plan — Grade 5 Scholarship Platform Enhancements (Mobile, Analytics, Email, Reporting, Branding)
+# STEAM Curriculum Hub — Updated Plan (POC → V1 → Features → Testing)
 
-## Objectives
-- Improve UX on phones/tablets (students/parents/teachers) without breaking existing flows.
-- Add deeper month-to-month analytics on 10 skill areas ("blood test" concept).
-- Add parent email notifications (exam published, results ready, monthly summary).
-- Add advanced reporting: Excel export + printable PDF report.
-- Add configurable branding (logo/colors/name) for Education Reforms Bureau / customer instances.
-- End every phase with e2e test + GitHub push checkpoint.
-
----
-
-## Phase 1 — POC: Email + Reporting Exports (core risky integrations)
-> External integrations + file generation are most failure-prone; validate in isolation first.
-
-### User stories
-1. As an admin, I want to send a test email so I can confirm deliverability before enabling notifications.
-2. As a parent, I want to receive an email when results are ready so I don’t miss progress updates.
-3. As a teacher, I want to export an exam’s results to Excel so I can share with academics.
-4. As a parent, I want a PDF report of monthly skill performance so I can print/share.
-5. As an admin, I want failures logged clearly so issues can be fixed quickly.
-
-### Implementation steps
-- Web research: best practice for FastAPI email (SendGrid vs SMTP), rate limits, templates.
-- Add isolated backend scripts:
-  - `scripts/test_email_send.py` (SendGrid or SMTP) using env vars only.
-  - `scripts/test_export_excel.py` create XLSX from sample aggregation.
-  - `scripts/test_export_pdf.py` generate a minimal PDF report.
-- Choose libraries:
-  - Email: SendGrid SDK **or** SMTP via `aiosmtplib` (decide based on ops).
-  - Excel: `openpyxl`.
-  - PDF: `reportlab` (simple) or `weasyprint` (html->pdf; heavier).
-- Define env template additions (no secrets committed).
-- Success gate: scripts run successfully in this environment.
-
-### Success criteria
-- Test email arrives to a real mailbox.
-- Excel export opens with correct columns + sample rows.
-- PDF renders and downloads with correct headings + a small chart/table.
+## 1) Objectives
+- Prove the **core learning flow** works end-to-end: **browse → open lesson → switch language (EN/Si/Ta) → bilingual display → premium checkout → return**.
+- Complete multilingual content pipeline in a controlled way:
+  - Round 1: **Sinhala + Tamil (GPT-5.2)** for all AI lessons (running).
+  - Round 2: **Mandarin + Cantonese (GPT-4o-mini)** with smaller, cost-controlled scope.
+- Ship a stable V1 experience including:
+  - **AI-STEAM curriculum** browsing by age group
+  - **Word Glossary** (EN ↔ native)
+  - **Payments** (Stripe + Sri Lanka bank option)
+  - **Branding** aligned to Education Reforms Bureau + TEC Sri Lanka Worldwide Pvt Ltd
+- Maintain reliability: translation jobs resumable, no schema breaks, solid QA.
 
 ---
 
-## Phase 2 — V1 App Development: Mobile Responsiveness + Analytics (no new auth)
+## 2) Implementation Steps (Phased)
 
-### User stories
-1. As a student, I want the MCQ exam UI to fit my phone screen so I can answer without zooming.
-2. As a student, I want the question navigator to be usable on mobile so I can jump quickly.
-3. As a parent, I want to see month-to-month skill trends so I understand improvement/decline.
-4. As a teacher, I want a class/grade analytics view so I can spot weak skill areas.
-5. As an admin, I want dashboards to load fast even with many attempts.
+### Phase 1 — Core Workflow POC (isolation + fix until works)
+**Why:** Translation + payments are external dependencies; validate core flows before expanding.
 
-### Implementation steps
-- Mobile-first UI pass (Tailwind):
-  - Audit key pages: Login, Student exam, Results, Parent dashboard, Teacher dashboard.
-  - Add responsive layouts: `flex-col` on small screens, sticky footer actions, collapsible sidebars.
-  - Improve touch targets, font scaling, and horizontal overflow fixes.
-- Analytics (backend + frontend):
-  - Add optimized aggregation endpoints (Mongo pipelines) for:
-    - student monthly trend per skill
-    - overall score trend
-    - grade-level distribution (optional)
-  - Frontend: add charts (Recharts) for trends + skill radar comparison per month.
-  - Cache heavy endpoints with TTL cache already present.
-- Conclude with 1 round of e2e testing (student takes exam on mobile viewport + parent views trends).
+**User stories (POC)**
+1. As a learner, I can load the lesson catalog from MongoDB and open a lesson detail page.
+2. As a learner, I can toggle language between **English and Sinhala/Tamil** and see translated text if available.
+3. As an admin, I can run a translation job and see translated fields appear in MongoDB.
+4. As a product owner, I can measure translation progress and resume safely after interruption.
+5. As a tester, I can confirm the API returns consistent lesson schema across languages.
 
-### Success criteria
-- All key screens usable at 360px width (no broken layout).
-- Parent dashboard shows month comparison and per-skill trend.
-- No major regression in exam-taking flow.
+**POC tasks — Status**
+- ✅ Fixed data scripts (generator/loader/translator) to remove hardcoded paths and use env-driven MongoDB.
+- ✅ Generated **1000 AI lessons** across 5 age groups.
+- ✅ Loaded **1000 AI lessons** into MongoDB Atlas.
+- 🔄 Translation Round 1 (GPT-5.2): **Sinhala + Tamil** running in background (**174/1000 complete**).
+- ✅ Sync translated lessons to local MongoDB for preview/testing.
+
+**Exit criteria (POC)**
+- ✅ Lessons reliably served with schema: `title/description/content` as language maps.
+- ✅ Language switching works with correct fallback.
+- ✅ Translation progress measurable and resumable.
 
 ---
 
-## Phase 3 — Add Features: Notifications + Exports in the App
+### Phase 2 — V1 App Development (MVP around proven core)
+**Focus:** Learner browsing + lesson viewing + language UX polish.
 
-### User stories
-1. As a parent, I want an email when an exam is published so I can remind my child.
-2. As a parent, I want an email summary after submission so I can track completion.
-3. As a teacher, I want to export results to Excel filtered by grade/month.
-4. As an admin, I want to download a PDF monthly report for a student.
-5. As a user, I want downloads to work on mobile too.
+**User stories (V1)**
+1. As a parent/teacher, I can filter lessons by **curriculum, subject, grade, age group**.
+2. As a student, I can open a lesson and read in English.
+3. As a student, I can switch to Sinhala/Tamil; the UI remembers my choice.
+4. As a student, I see clear fallback to English when a translation is missing.
+5. As a user, I can share a lesson link.
 
-### Implementation steps
-- Email notifications:
-  - Add backend notification service + template rendering.
-  - Trigger points: exam publish, results ready, monthly summary (manual trigger first; scheduled later).
-  - Add admin UI toggle: enable/disable notifications + test-send.
-- Reporting:
-  - Backend endpoints:
-    - `GET /reports/student/{id}/month/{yyyy-mm}.pdf`
-    - `GET /reports/grade/{grade}/month/{yyyy-mm}.xlsx`
-  - Frontend buttons in Teacher/Admin/Parent dashboards.
-- Conclude with e2e testing: publish exam → submit → email → export XLSX/PDF.
+**Build steps — Status**
+- ✅ Frontend language switcher updated to use **DB translations** (no MyMemory dependency) with bilingual display.
+- ✅ Lesson detail page includes **Show English / Hide English** toggle when translations exist.
+- ✅ AI-STEAM curriculum filter added to lesson catalog.
+- ✅ Age-group URL routing implemented: `/lessons?age=5-7` and page banner.
+- ✅ Beautiful kid-friendly **section covers** on Home page:
+  - 5–7 mint/green, 8–9 soft blue, 10–12 lavender
+  - plus 13–15 amber, 16–18 pink
+- ✅ Themed age-group lesson cards + subtle watermark.
+- ✅ Branding updated in footer:
+  - “Made by Education Reforms Bureau”
+  - “© TEC Sri Lanka Worldwide Pvt Ltd”
 
-### Success criteria
-- Emails send successfully and failures are visible in logs/UI.
-- Exported XLSX/PDF match the selected filters and open reliably.
-
----
-
-## Phase 4 — Branding Customization (MVP)
-
-### User stories
-1. As an admin, I want to upload a logo so the portal matches our institution.
-2. As an admin, I want to set primary/secondary colors so UI matches branding.
-3. As an admin, I want to edit portal name/tagline so it’s official.
-4. As a user, I want branding to persist across sessions.
-5. As a developer, I want branding config to be environment-based for deployments.
-
-### Implementation steps
-- Branding model in DB (single document): name, tagline, colors, logo URL.
-- Backend endpoints: get/update branding, upload logo (store under `uploads/branding`).
-- Frontend: apply theme vars (CSS variables) + logo in header/login.
-- Conclude with e2e testing: update branding → refresh → persists.
-
-### Success criteria
-- Branding updates apply without rebuild and persist.
-- No visual regressions across roles.
+**End of Phase 2 testing**
+- ✅ Testing agent: **Backend 98%**, **Frontend 95%**, **0 critical bugs**.
 
 ---
 
-## Phase 5 — Hardening, QA, GitHub Push
+### Phase 3 — Add Monetization (Stripe) + Access Control
+**Core dependency:** Stripe checkout + status polling + webhook.
 
-### User stories
-1. As a user, I want the app to remain stable after updates.
-2. As an admin, I want a checklist to confirm features before launch.
-3. As a teacher, I want exports to be accurate for official review.
-4. As a parent, I want emails to be reliable and not spammy.
-5. As an operator, I want secrets managed safely.
+**User stories (Payments)**
+1. As a user, I can start a subscription checkout and return to the app on success.
+2. As a user, I can confirm payment success from the return page.
+3. As an admin, I can validate webhook events update transaction status reliably.
+4. As a non-subscriber, I see a paywall (future).
+5. As a subscriber, I can access premium actions (future gating).
 
-### Implementation steps
-- Regression testing across roles + mobile viewport.
-- Performance check on analytics endpoints; add indexes if needed.
-- Security review for downloads + role-based access.
-- Update docs: `.env.example`, QUICK_START, deployment notes.
-- Push working changes to GitHub (commit per phase).
+**Build — Status**
+- ✅ Stripe checkout integrated:
+  - Standard: **$5/mo**
+  - Premium: **$10/mo**
+- ✅ `PaymentSuccess` page with status polling.
+- ✅ Webhook endpoint implemented.
+- ✅ Transactions persisted in MongoDB (`payment_transactions`).
+- ✅ Sri Lanka bank-transfer option displayed:
+  - Standard: **LKR 1500**
+  - Premium: **LKR 3000**
 
-### Success criteria
-- All new features pass e2e tests.
-- GitHub contains latest working version with updated env templates/docs.
+**Remaining work (Payments / Access control)**
+- ⏳ Implement subscription/user association and enforce gating for premium actions (PDF/full language packs, etc.).
+- ⏳ Add idempotency rules and admin view for transactions.
 
 ---
 
-## Next actions (immediate)
-1. Choose email provider for POC: **SendGrid** (recommended) or **SMTP** (Gmail/SES).
-2. Provide a test email address to receive POC emails.
-3. Confirm report scope for exports (Student monthly PDF + Grade monthly Excel as default).
+### Phase 4 — TTS (Proof + V1)
+**Decision update:** TTS will **not** be implemented now because users will rely on **Google Voice app** for voice in target countries.
+
+**Status**
+- ✅ No work required for V1.
+
+---
+
+### Phase 5 — Round 2 Translation (Mandarin + Cantonese)
+**User stories (Round 2 translation)**
+1. As an admin, I can translate a selected language set only (cost control).
+2. As an admin, I can translate only missing lessons (resume).
+3. As a learner, I can select Mandarin and see translated content.
+4. As a learner, I can select Cantonese and see translated content.
+
+**Steps (Planned)**
+- Decide language codes:
+  - Mandarin: `zh` (Simplified)
+  - Cantonese: `yue` (recommended) or `zh-HK` (confirm preferred script: typically Traditional for HK)
+- Create a separate translator config for **GPT-4o-mini**.
+- Run in controlled batches (e.g., 50 lessons), verify quality, then complete.
+
+---
+
+### Phase 6 — Comprehensive QA + Hardening
+**User stories (QA)**
+1. As a user, I never see broken lesson pages even if some fields are missing.
+2. As a user, navigation stays fast with pagination/search.
+3. As an admin, background jobs can be restarted safely.
+4. As a subscriber (future), access persists across sessions/devices.
+5. As a maintainer, logs/metrics help diagnose failures quickly.
+
+**Tasks (Remaining / Ongoing)**
+- Regression test across languages + age groups as translation coverage increases.
+- Performance checks (indexes, pagination, search).
+- Backup/export plan for lessons + translations.
+- Production readiness checks:
+  - environment variables
+  - webhook config
+  - HTTPS + domain
+
+---
+
+## 3) Next Actions (immediate)
+1. **Monitor Round 1 translation** until completion; verify counts for `title.si` and `title.ta`.
+2. Keep syncing translated lessons from Atlas to the local preview DB (for demos/testing).
+3. Add **subscription access control** (gating) on premium features (PDF download, full language packs).
+4. Expand the **Word Glossary** beyond 20 terms (optional, staged).
+5. Prepare **DigitalOcean production deployment steps**:
+   - `git pull` on server
+   - ensure `.env` contains Stripe keys and Atlas connection
+   - restart services
+   - verify webhook URL in Stripe dashboard
+
+---
+
+## 4) Success Criteria
+- **Content:** 1000 AI lessons in Atlas; Sinhala + Tamil fields present for ~100% of lessons (or clearly tracked missing).
+- **Core UX:** Catalog + lesson detail pages load reliably; language switching instant with correct fallback; bilingual display works.
+- **Payments:** Stripe checkout works in test mode; webhook records transactions; PaymentSuccess verification works.
+- **Glossary:** Glossary page available with EN ↔ Sinhala/Tamil terms and search/filter.
+- **Branding:** Footer shows Education Reforms Bureau + TEC Sri Lanka Worldwide Pvt Ltd; kid-friendly academic palette for 5–12 sections.
+- **Reliability:** Translation jobs resumable; no schema breaks; automated tests show no critical issues.

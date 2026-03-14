@@ -1,18 +1,26 @@
 [
   {
-    "content": "Option B: Create Full Desktop App with Electron - Structure created",
+    "content": "Copy STEAM Hub code to working directory",
     "status": "completed"
   },
   {
-    "content": "Create master installation guide comparing all 3 options",
+    "content": "Simplify TTS to use browser-only (FREE)",
+    "status": "completed"
+  },
+  {
+    "content": "Set Sinhala as default language + focus on SI/EN only",
     "status": "in_progress"
   },
   {
-    "content": "Create final package summary document",
+    "content": "Test language switching and voice",
     "status": "pending"
   },
   {
-    "content": "Push everything to GitHub",
+    "content": "Create deployment packages (Docker/Desktop/Portable)",
+    "status": "pending"
+  },
+  {
+    "content": "Push to GitHub",
     "status": "pending"
   }
 ]
